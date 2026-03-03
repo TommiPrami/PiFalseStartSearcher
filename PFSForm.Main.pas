@@ -3,8 +3,8 @@
 interface
 
 uses
-  Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
-  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, System.Generics.Collections, System.Threading, Vcl.ExtCtrls,
+  Winapi.Messages, Winapi.Windows, System.Classes, System.Generics.Collections, System.SysUtils, System.Threading,
+  System.UITypes, System.Variants, Vcl.Controls, Vcl.Dialogs, Vcl.ExtCtrls, Vcl.Forms, Vcl.Graphics, Vcl.StdCtrls,
   PFSUnit.FalseRestartSearch;
 
 type
@@ -16,6 +16,10 @@ type
     EditFileName: TEdit;
     MemoLog: TMemo;
     ButtonStopRun: TButton;
+    ButtonValidateFIle: TButton;
+    ButtonMakeValidFile: TButton;
+    procedure ButtonMakeValidFileClick(Sender: TObject);
+    procedure ButtonValidateFIleClick(Sender: TObject);
     procedure ButtonRunClick(Sender: TObject);
     procedure ButtonStopRunClick(Sender: TObject);
     procedure FormCreate(Sender: TObject);
@@ -32,6 +36,42 @@ var
 implementation
 
 {$R *.dfm}
+
+procedure TPFSMainForm.ButtonMakeValidFileClick(Sender: TObject);
+begin
+  raise Exception.Create('"ButtonMakeValidFileClick" - Not Implemented Yet');
+end;
+
+procedure TPFSMainForm.ButtonValidateFIleClick(Sender: TObject);
+const
+  READ_BUFFER_SIZE = 1024 * 1024;
+  STREAM_BFFER_SIZE = READ_BUFFER_SIZE * 32;
+begin
+  Screen.Cursor := crHourGlass;
+  var LBuffer: TArray<AnsiChar> := [];
+  SetLength(LBuffer, READ_BUFFER_SIZE);
+
+  var LBytesRead: LongInt := 5;
+  var LFileStream := TBufferedFileSTream.Create(EditFileName.Text, fmOpenRead or fmShareDenyWrite, STREAM_BFFER_SIZE);
+  try
+    while LBytesRead > 0 do
+    begin
+      LBytesRead := LFileStream.Read(LBuffer[0], READ_BUFFER_SIZE);
+
+      for var LIndex := 0 to LBytesRead - 1 do
+        if not (LBuffer[LIndex] in ['0'..'9', '.']) then
+        begin
+          MessageDlg('File ' + string(EditFileName.Text).QuotedString('"') + ' contains nonvalid characters like: ' +
+            IntToHex(Ord(LBuffer[LIndex])), mtError, [mbOK], 0);
+
+          Exit;
+        end;
+    end;
+  finally
+    LFileStream .Free;
+    Screen.Cursor := crDefault;
+  end;
+end;
 
 { TPFSMainForm }
 

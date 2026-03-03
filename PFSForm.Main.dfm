@@ -45,6 +45,26 @@ object PFSMainForm: TPFSMainForm
       TabOrder = 1
       OnClick = ButtonStopRunClick
     end
+    object ButtonValidateFIle: TButton
+      Left = 0
+      Top = 337
+      Width = 106
+      Height = 25
+      Align = alBottom
+      Caption = 'Validate file'
+      TabOrder = 2
+      OnClick = ButtonValidateFIleClick
+    end
+    object ButtonMakeValidFile: TButton
+      Left = 0
+      Top = 362
+      Width = 106
+      Height = 25
+      Align = alBottom
+      Caption = 'Make valid file'
+      TabOrder = 3
+      OnClick = ButtonMakeValidFileClick
+    end
   end
   object Panel2: TPanel
     Left = 0
