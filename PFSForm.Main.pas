@@ -42,6 +42,37 @@ begin
   raise Exception.Create('"ButtonMakeValidFileClick" - Not Implemented Yet');
 end;
 
+function IntToStrTS(const AValue: UInt64; const ASeparator: Char = ' '): string;
+var
+  LThirdOfLength, LRemainder, LIndex: Integer;
+  LPosition, LStep: Integer;
+  LLength: Integer;
+begin
+  Result := IntToStr(AValue);
+
+  if AValue < 1000 then
+    Exit;
+
+  LLength := Length(Result);
+  LThirdOfLength := LLength div 3;
+  LRemainder := LLength mod 3;
+
+  LStep := LRemainder + 1;
+
+  LPosition := 4;
+  if LRemainder <> 0 then
+  begin
+    Insert(ASeparator, Result, LStep);
+    Inc(LPosition, LStep);
+  end;
+
+  for LIndex := 1 to (LThirdOfLength - 1) do
+  begin
+    Insert(ASeparator, Result, LPosition);
+    Inc(LPosition, 4);
+  end;
+end;
+
 procedure TPFSMainForm.ButtonValidateFIleClick(Sender: TObject);
 const
   READ_BUFFER_SIZE = 1024 * 1024;
@@ -102,7 +133,7 @@ end;
 
 procedure TPFSMainForm.FalseRestartFound(const ASender: TObject; const APosition: Int64; const AMatchedValue: AnsiString);
 begin
-  MemoLog.Lines.Add('Pos: ' + APosition.ToString + ' - "' + string(AMatchedValue) + '"');
+  MemoLog.Lines.Add('Pos: ' + IntToStrTS(APosition) + ' - "' + string(AMatchedValue) + '"');
 end;
 
 procedure TPFSMainForm.TaskEndedEvent(const APiSearcher: TPiFalseRestartSearcher);
