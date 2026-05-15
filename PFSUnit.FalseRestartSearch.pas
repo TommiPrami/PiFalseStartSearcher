@@ -34,7 +34,7 @@ type
     function LoadPiPrefix: AnsiString;
     procedure BuildKmpTable;
     procedure FireMatch(const APosition: Int64; const ALen: Integer); {$IF NOT Defined(DEBUG)}inline;{$ENDIF}
-    procedure SetMinMatchLen(const AValue: Integer);
+    // procedure SetMinMatchLen(const AValue: Integer);
     procedure DoBeforeRunValidation;
     procedure StartSeachTask(const AFileStream: TFileStream);
     procedure ThreadedSearchFileStreamProc(const AFileStream: TFileStream);
@@ -241,6 +241,8 @@ end;
 
 function TPiFalseRestartSearcher.GetStatus: TRunStatus;
 begin
+  Result := rsNone;
+
   if Lock then
   try
     Result := FStatus;
@@ -306,6 +308,7 @@ begin
   StartSeachTask(FFileStream);
 end;
 
+(*
 procedure TPiFalseRestartSearcher.SetMinMatchLen(const AValue: Integer);
 begin
   if AValue >= MIN_MATCH_LENGTH then
@@ -313,6 +316,7 @@ begin
   else
     FMinMatchLength := MIN_MATCH_LENGTH;
 end;
+*)
 
 procedure TPiFalseRestartSearcher.SetStatus(const AStatus: TRunStatus);
 begin
