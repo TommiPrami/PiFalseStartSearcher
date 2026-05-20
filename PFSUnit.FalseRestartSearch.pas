@@ -36,12 +36,12 @@ type
     procedure FireMatch(const APosition: Int64; const ALen: Integer); {$IF NOT Defined(DEBUG)}inline;{$ENDIF}
     // procedure SetMinMatchLen(const AValue: Integer);
     procedure DoBeforeRunValidation;
-    procedure StartSeachTask(const AFileStream: TFileStream);
+    procedure StartSearchTask(const AFileStream: TFileStream);
     procedure ThreadedSearchFileStreamProc(const AFileStream: TFileStream);
     procedure SetStatus(const AStatus: TRunStatus); {$IF NOT Defined(DEBUG)}inline;{$ENDIF}
     function GetStatus: TRunStatus;
     function Lock: Boolean; {$IF NOT Defined(DEBUG)}inline;{$ENDIF}
-    procedure UnLock;
+    procedure Unlock;
   private
     function GetElapsedSeconds: Double; {$IF NOT Defined(DEBUG)}inline;{$ENDIF}
   public
@@ -247,7 +247,7 @@ begin
   try
     Result := FStatus;
   finally
-    UnLock;
+    Unlock;
   end;
 end;
 
@@ -305,7 +305,7 @@ begin
 
   FFileStream := TBufferedFileStream.Create(AFileName, fmOpenRead or fmShareDenyWrite, BufferSize * 8);
 
-  StartSeachTask(FFileStream);
+  StartSearchTask(FFileStream);
 end;
 
 (*
@@ -324,15 +324,15 @@ begin
   try
     FStatus := AStatus;
 
-    // TODO: test this, should not need this, loop shpould exit fast...
+    // TODO: test this, should not need this, loop should exit fast...
     // if (FStatus = rsCanceled) and Assigned(FTask) then
     //   FTask.Cancel;
   finally
-    UnLock;
+    Unlock;
   end;
 end;
 
-procedure TPiFalseRestartSearcher.StartSeachTask(const AFileStream: TFileStream);
+procedure TPiFalseRestartSearcher.StartSearchTask(const AFileStream: TFileStream);
 begin
   FTask := TTask.Create(
     procedure
@@ -383,7 +383,7 @@ var
   ch: Byte;
   j: Integer; // KMP state: digits matched so far
 begin
-  var LPiPrefixLength: Integer := Length(FPiPrefix);;
+  var LPiPrefixLength: Integer := Length(FPiPrefix);
   var LBuffer: TBytes;
 
   // Allocate once: room for (m-1) overlap + up to FBufferSize new bytes
@@ -464,7 +464,7 @@ begin
     FireMatch(LRunStart, j);
 end;
 
-procedure TPiFalseRestartSearcher.UnLock;
+procedure TPiFalseRestartSearcher.Unlock;
 begin
   FLock.Release;
 end;

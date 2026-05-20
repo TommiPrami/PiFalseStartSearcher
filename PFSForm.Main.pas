@@ -83,7 +83,7 @@ begin
   SetLength(LBuffer, READ_BUFFER_SIZE);
 
   var LBytesRead: LongInt := 5;
-  var LFileStream := TBufferedFileSTream.Create(EditFileName.Text, fmOpenRead or fmShareDenyWrite, STREAM_BFFER_SIZE);
+  var LFileStream := TBufferedFileStream.Create(EditFileName.Text, fmOpenRead or fmShareDenyWrite, STREAM_BFFER_SIZE);
   try
     while LBytesRead > 0 do
     begin
@@ -147,9 +147,9 @@ begin
   MemoLog.Lines.Add('');
 
   if APiSearcher.Status = rsCanceled then
-    MemoLog.Lines.Add('Run canceled. At running time ' + GetElapsedStr(APiSearcher))
+    MemoLog.Lines.Add('Run canceled. At the running time ' + GetElapsedStr(APiSearcher))
   else if APiSearcher.Status = rsError then
-    MemoLog.Lines.Add('Error occured. At running time ' + GetElapsedStr(APiSearcher))
+    MemoLog.Lines.Add('Error occurred. At the running time ' + GetElapsedStr(APiSearcher))
   else
     MemoLog.Lines.Add('Run finished. It took us ' + GetElapsedStr(APiSearcher));
 
