@@ -10,9 +10,9 @@ uses
 type
   TPFSMainForm = class(TForm)
     TimerProgress: TTimer;
-    Panel1: TPanel;
+    PanelButtons: TPanel;
     ButtonRun: TButton;
-    Panel2: TPanel;
+    PanelLog: TPanel;
     EditFileName: TEdit;
     MemoLog: TMemo;
     ButtonStopRun: TButton;

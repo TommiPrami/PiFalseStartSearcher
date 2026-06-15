@@ -12,7 +12,7 @@ object PFSMainForm: TPFSMainForm
   Font.Style = []
   OnCreate = FormCreate
   TextHeight = 15
-  object Panel1: TPanel
+  object PanelButtons: TPanel
     Left = 425
     Top = 0
     Width = 106
@@ -66,7 +66,7 @@ object PFSMainForm: TPFSMainForm
       OnClick = ButtonMakeValidFileClick
     end
   end
-  object Panel2: TPanel
+  object PanelLog: TPanel
     Left = 0
     Top = 0
     Width = 425
