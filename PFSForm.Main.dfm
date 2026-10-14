@@ -2,8 +2,8 @@ object PFSMainForm: TPFSMainForm
   Left = 0
   Top = 0
   Caption = 'Pi False Start Search'
-  ClientHeight = 560
-  ClientWidth = 780
+  ClientHeight = 727
+  ClientWidth = 999
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -15,10 +15,10 @@ object PFSMainForm: TPFSMainForm
   OnDestroy = FormDestroy
   TextHeight = 15
   object PanelButtons: TPanel
-    Left = 674
+    Left = 893
     Top = 0
     Width = 106
-    Height = 560
+    Height = 727
     Align = alRight
     BevelOuter = bvNone
     ShowCaption = False
@@ -48,8 +48,8 @@ object PFSMainForm: TPFSMainForm
   object PanelLog: TPanel
     Left = 0
     Top = 0
-    Width = 674
-    Height = 560
+    Width = 893
+    Height = 727
     Align = alClient
     BevelOuter = bvNone
     ShowCaption = False
@@ -58,7 +58,7 @@ object PFSMainForm: TPFSMainForm
       AlignWithMargins = True
       Left = 3
       Top = 108
-      Width = 73
+      Width = 887
       Height = 15
       Align = alTop
       Caption = 'LabelProgress'
@@ -66,7 +66,7 @@ object PFSMainForm: TPFSMainForm
     object PanelFile: TPanel
       Left = 0
       Top = 0
-      Width = 674
+      Width = 893
       Height = 29
       Align = alTop
       BevelOuter = bvNone
@@ -76,7 +76,7 @@ object PFSMainForm: TPFSMainForm
         AlignWithMargins = True
         Left = 3
         Top = 3
-        Width = 632
+        Width = 851
         Height = 23
         Align = alClient
         TabOrder = 0
@@ -84,7 +84,7 @@ object PFSMainForm: TPFSMainForm
       end
       object ButtonBrowse: TButton
         AlignWithMargins = True
-        Left = 641
+        Left = 860
         Top = 3
         Width = 30
         Height = 23
@@ -96,7 +96,7 @@ object PFSMainForm: TPFSMainForm
     object PanelOptions: TPanel
       Left = 0
       Top = 29
-      Width = 674
+      Width = 893
       Height = 76
       Align = alTop
       BevelOuter = bvNone
@@ -177,8 +177,8 @@ object PFSMainForm: TPFSMainForm
       AlignWithMargins = True
       Left = 3
       Top = 129
-      Width = 668
-      Height = 428
+      Width = 887
+      Height = 595
       Align = alClient
       Font.Charset = DEFAULT_CHARSET
       Font.Color = clWindowText
