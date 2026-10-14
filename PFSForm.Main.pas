@@ -3,31 +3,53 @@
 interface
 
 uses
-  Winapi.Messages, Winapi.Windows, System.Classes, System.Generics.Collections, System.SysUtils, System.Threading,
-  System.UITypes, System.Variants, Vcl.Controls, Vcl.Dialogs, Vcl.ExtCtrls, Vcl.Forms, Vcl.Graphics, Vcl.StdCtrls,
-  PFSUnit.FalseRestartSearch;
+  Winapi.Messages, Winapi.Windows, System.Actions, System.Classes, System.SysUtils, System.UITypes, System.Variants,
+  Vcl.ActnList, Vcl.Controls, Vcl.Dialogs, Vcl.ExtCtrls, Vcl.Forms, Vcl.Graphics, Vcl.Samples.Spin, Vcl.StdCtrls,
+  PFSUnit.FalseStartSearch, PFSUnit.Report, PFSUnit.RunLog;
 
 type
   TPFSMainForm = class(TForm)
-    TimerProgress: TTimer;
-    PanelButtons: TPanel;
+    ActionBrowse: TAction;
+    ActionListMain: TActionList;
+    ActionRun: TAction;
+    ActionStopRun: TAction;
+    ButtonBrowse: TButton;
     ButtonRun: TButton;
-    PanelLog: TPanel;
-    EditFileName: TEdit;
-    MemoLog: TMemo;
     ButtonStopRun: TButton;
-    ButtonValidateFIle: TButton;
-    ButtonMakeValidFile: TButton;
-    procedure ButtonMakeValidFileClick(Sender: TObject);
-    procedure ButtonValidateFIleClick(Sender: TObject);
-    procedure ButtonRunClick(Sender: TObject);
-    procedure ButtonStopRunClick(Sender: TObject);
+    CheckBoxContinuationFiles: TCheckBox;
+    CheckBoxListFalseStarts: TCheckBox;
+    CheckBoxOnlyNewLongest: TCheckBox;
+    CheckBoxSelfLocating: TCheckBox;
+    CheckBoxSummaryNewLongest: TCheckBox;
+    EditFileName: TEdit;
+    LabelProgress: TLabel;
+    MemoLog: TMemo;
+    OpenDialogPiFile: TOpenDialog;
+    PanelButtons: TPanel;
+    PanelFile: TPanel;
+    PanelLog: TPanel;
+    PanelOptions: TPanel;
+    SpinEditListMatchLength: TSpinEdit;
+    TimerProgress: TTimer;
+    procedure ActionBrowseExecute(Sender: TObject);
+    procedure ActionBrowseUpdate(Sender: TObject);
+    procedure ActionRunExecute(Sender: TObject);
+    procedure ActionRunUpdate(Sender: TObject);
+    procedure ActionStopRunExecute(Sender: TObject);
+    procedure ActionStopRunUpdate(Sender: TObject);
     procedure FormCreate(Sender: TObject);
+    procedure FormDestroy(Sender: TObject);
     procedure TimerProgressTimer(Sender: TObject);
   strict private
-    FPiSearcher: TPiFalseRestartSearcher;
-    procedure FalseRestartFound(const ASender: TObject; const APosition: Int64; const AMatchedValue: AnsiString);
-    procedure TaskEndedEvent(const APiSearcher: TPiFalseRestartSearcher);
+    FPiSearcher: TPiFalseStartSearcher;
+    FRunLog: TPFSRunLog;
+    // True from the start of a run until its end event has run, not only while the search thread runs
+    FRunning: Boolean;
+    function GetFileNames: TArray<string>;
+    function GetListedKinds: TPFSMatchKinds;
+    procedure FalseStartFound(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
+    procedure SearchEnded(const APiSearcher: TPiFalseStartSearcher);
+    procedure SetRunning(const ARunning: Boolean);
   end;
 
 var
@@ -35,138 +57,127 @@ var
 
 implementation
 
+uses
+  PFSUnit.RunLog.Memo;
+
 {$R *.dfm}
-
-procedure TPFSMainForm.ButtonMakeValidFileClick(Sender: TObject);
-begin
-  raise Exception.Create('"ButtonMakeValidFileClick" - Not Implemented Yet');
-end;
-
-function IntToStrTS(const AValue: UInt64; const ASeparator: Char = ' '): string;
-var
-  LThirdOfLength, LRemainder, LIndex: Integer;
-  LPosition, LStep: Integer;
-  LLength: Integer;
-begin
-  Result := IntToStr(AValue);
-
-  if AValue < 1000 then
-    Exit;
-
-  LLength := Length(Result);
-  LThirdOfLength := LLength div 3;
-  LRemainder := LLength mod 3;
-
-  LStep := LRemainder + 1;
-
-  LPosition := 4;
-  if LRemainder <> 0 then
-  begin
-    Insert(ASeparator, Result, LStep);
-    Inc(LPosition, LStep);
-  end;
-
-  for LIndex := 1 to (LThirdOfLength - 1) do
-  begin
-    Insert(ASeparator, Result, LPosition);
-    Inc(LPosition, 4);
-  end;
-end;
-
-procedure TPFSMainForm.ButtonValidateFIleClick(Sender: TObject);
-const
-  READ_BUFFER_SIZE = 1024 * 1024;
-  STREAM_BFFER_SIZE = READ_BUFFER_SIZE * 32;
-begin
-  Screen.Cursor := crHourGlass;
-  var LBuffer: TArray<AnsiChar> := [];
-  SetLength(LBuffer, READ_BUFFER_SIZE);
-
-  var LBytesRead: LongInt := 5;
-  var LFileStream := TBufferedFileStream.Create(EditFileName.Text, fmOpenRead or fmShareDenyWrite, STREAM_BFFER_SIZE);
-  try
-    while LBytesRead > 0 do
-    begin
-      LBytesRead := LFileStream.Read(LBuffer[0], READ_BUFFER_SIZE);
-
-      for var LIndex := 0 to LBytesRead - 1 do
-        if not (LBuffer[LIndex] in ['0'..'9', '.']) then
-        begin
-          MessageDlg('File ' + string(EditFileName.Text).QuotedString('"') + ' contains nonvalid characters like: ' +
-            IntToHex(Ord(LBuffer[LIndex])), mtError, [mbOK], 0);
-
-          Exit;
-        end;
-    end;
-  finally
-    LFileStream .Free;
-    Screen.Cursor := crDefault;
-  end;
-end;
 
 { TPFSMainForm }
 
-procedure TPFSMainForm.FormCreate(Sender: TObject);
+procedure TPFSMainForm.ActionBrowseExecute(Sender: TObject);
 begin
-  FPiSearcher := nil;
+  OpenDialogPiFile.FileName := EditFileName.Text;
+
+  if OpenDialogPiFile.Execute then
+    EditFileName.Text := OpenDialogPiFile.FileName;
 end;
 
-procedure TPFSMainForm.ButtonRunClick(Sender: TObject);
+procedure TPFSMainForm.ActionBrowseUpdate(Sender: TObject);
 begin
-  if Assigned(FPiSearcher) then
+  ActionBrowse.Enabled := not FRunning;
+end;
+
+procedure TPFSMainForm.ActionRunExecute(Sender: TObject);
+begin
+  if FRunning then
     Exit;
 
-  (Sender as TButton).Enabled := False;
-  ButtonStopRun.Enabled := True;
-  TimerProgress.Enabled := True;
-  MemoLog.Clear;
+  FreeAndNil(FPiSearcher);
+  FRunLog.Clear;
 
-  FPiSearcher := TPiFalseRestartSearcher.Create(FalseRestartFound, TaskEndedEvent, True);
-  FPiSearcher.Execute(EditFileName.Text);
+  FPiSearcher := TPiFalseStartSearcher.Create(FalseStartFound, SearchEnded);
+  try
+    FPiSearcher.ListMatchLength := SpinEditListMatchLength.Value;
+    FPiSearcher.OnlyNewLongestMatches := CheckBoxOnlyNewLongest.Checked;
+    FPiSearcher.SearchSelfLocating := CheckBoxSelfLocating.Checked;
+    FPiSearcher.Execute(GetFileNames);
+  except
+    FreeAndNil(FPiSearcher);
+    raise;
+  end;
+
+  FRunLog.LogRunStarted(FPiSearcher);
+  SetRunning(True);
 end;
 
-procedure TPFSMainForm.ButtonStopRunClick(Sender: TObject);
+procedure TPFSMainForm.ActionRunUpdate(Sender: TObject);
+begin
+  ActionRun.Enabled := not FRunning;
+end;
+
+procedure TPFSMainForm.ActionStopRunExecute(Sender: TObject);
 begin
   if Assigned(FPiSearcher) then
     FPiSearcher.Cancel;
 end;
 
-procedure TPFSMainForm.FalseRestartFound(const ASender: TObject; const APosition: Int64; const AMatchedValue: AnsiString);
+procedure TPFSMainForm.ActionStopRunUpdate(Sender: TObject);
 begin
-  MemoLog.Lines.Add('Pos: ' + IntToStrTS(APosition) + ' - "' + string(AMatchedValue) + '"');
+  ActionStopRun.Enabled := FRunning;
 end;
 
-procedure TPFSMainForm.TaskEndedEvent(const APiSearcher: TPiFalseRestartSearcher);
-
-  function GetElapsedStr(const APiSearcher: TPiFalseRestartSearcher): string;
-  begin
-    Result := FormatFloat('0.00', APiSearcher.ElapsedSeconds) + 's';
-  end;
-
+procedure TPFSMainForm.FalseStartFound(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
 begin
-  MemoLog.Lines.Add('');
+  FRunLog.LogMatch(APiSearcher, AMatch);
+end;
 
-  if APiSearcher.Status = rsCanceled then
-    MemoLog.Lines.Add('Run canceled. At the running time ' + GetElapsedStr(APiSearcher))
-  else if APiSearcher.Status = rsError then
-    MemoLog.Lines.Add('Error occurred. At the running time ' + GetElapsedStr(APiSearcher))
+procedure TPFSMainForm.FormCreate(Sender: TObject);
+begin
+  FPiSearcher := nil;
+  FRunning := False;
+  FRunLog := TPFSMemoRunLog.Create(MemoLog, LabelProgress);
+  FRunLog.Clear;
+end;
+
+procedure TPFSMainForm.FormDestroy(Sender: TObject);
+begin
+  // Cancels a running search and waits for it, before the log its events write to goes
+  FreeAndNil(FPiSearcher);
+  FreeAndNil(FRunLog);
+end;
+
+function TPFSMainForm.GetFileNames: TArray<string>;
+begin
+  if CheckBoxContinuationFiles.Checked then
+    Result := TPiFalseStartSearcher.FindContinuationFiles(EditFileName.Text)
   else
-    MemoLog.Lines.Add('Run finished. It took us ' + GetElapsedStr(APiSearcher));
+    Result := [EditFileName.Text];
+end;
 
-  ButtonRun.Enabled := True;
-  ButtonStopRun.Enabled := not ButtonRun.Enabled;
+function TPFSMainForm.GetListedKinds: TPFSMatchKinds;
+begin
+  Result := [];
+
+  if CheckBoxListFalseStarts.Checked then
+    Include(Result, mkFalseStart);
+
+  if CheckBoxSummaryNewLongest.Checked then
+    Include(Result, mkNewLongest);
+end;
+
+procedure TPFSMainForm.SearchEnded(const APiSearcher: TPiFalseStartSearcher);
+begin
+  SetRunning(False);
+  FRunLog.LogRunEnded(APiSearcher, GetListedKinds);
+end;
+
+procedure TPFSMainForm.SetRunning(const ARunning: Boolean);
+begin
+  FRunning := ARunning;
+
+  // The buttons follow FRunning through their actions
+  EditFileName.Enabled := not ARunning;
+
+  for var LIndex := 0 to PanelOptions.ControlCount - 1 do
+    PanelOptions.Controls[LIndex].Enabled := not ARunning;
+
+  TimerProgress.Enabled := ARunning;
 end;
 
 procedure TPFSMainForm.TimerProgressTimer(Sender: TObject);
 begin
-  if not Assigned(FPiSearcher) then
-    Exit;
-
-  if FPiSearcher.HasRunEndedStatus and ButtonRun.Enabled then
-  begin
-    FreeAndNil(FPiSearcher);
-    TimerProgress.Enabled := False;
-  end;
+  if Assigned(FPiSearcher) then
+    FRunLog.ShowProgress(FPiSearcher.Progress);
 end;
 
 end.

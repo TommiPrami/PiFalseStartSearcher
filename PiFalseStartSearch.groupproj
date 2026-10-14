@@ -1,0 +1,48 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{FBC8C1F4-40B5-49AC-B414-8E78EF7D9C24}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="PiFalseStartSearch.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="PiFalseStartSearchConsole.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="PiFalseStartSearch">
+        <MSBuild Projects="PiFalseStartSearch.dproj"/>
+    </Target>
+    <Target Name="PiFalseStartSearch:Clean">
+        <MSBuild Projects="PiFalseStartSearch.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="PiFalseStartSearch:Make">
+        <MSBuild Projects="PiFalseStartSearch.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="PiFalseStartSearchConsole">
+        <MSBuild Projects="PiFalseStartSearchConsole.dproj"/>
+    </Target>
+    <Target Name="PiFalseStartSearchConsole:Clean">
+        <MSBuild Projects="PiFalseStartSearchConsole.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="PiFalseStartSearchConsole:Make">
+        <MSBuild Projects="PiFalseStartSearchConsole.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="PiFalseStartSearch;PiFalseStartSearchConsole"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="PiFalseStartSearch:Clean;PiFalseStartSearchConsole:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="PiFalseStartSearch:Make;PiFalseStartSearchConsole:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>
