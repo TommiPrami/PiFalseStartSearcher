@@ -81,7 +81,8 @@ type
   // How the digit files are read
   TPFSReadMethod = (
     rmReadFile,               // Windows ReadFile, with the sequential scan hint
-    rmIORingStream,           // TSequentialReadOnlyFileStream, big reads go straight into the buffer
+    rmFileStream,             // Delphi's TFileStream, the usual way
+    rmIORingStream,          // TSequentialReadOnlyFileStream, big reads go straight into the buffer
     rmIORingReader,           // TIORingSequentialReader, digits copied straight from its buffers
     rmIORingReaderUnbuffered  // the same, past the file cache
   );
@@ -100,21 +101,23 @@ type
     FFirstUnexpectedChar: string;
     FHandle: THandle;
     FIORingReader: TIORingSequentialReader;
-    FIORingStream: TSequentialReadOnlyFileStream;
     FNonDigitCount: Int64;
     FReadMethod: TPFSReadMethod;
+    FStream: TStream; // TFileStream or TSequentialReadOnlyFileStream
     FUnexpectedCharCount: Int64;
     function CompactDigits(const ASource, ATarget: PByte; const ACount: Integer): Integer;
     function GetBytesRead: Int64;
     function OpenNextFile: Boolean;
     function ReadFromIORingReader(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
     function ReadInPlace(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
-    procedure CloseCurrentFile;
     procedure FileBytesRead(const ACount: Integer);
     procedure NonDigitFound(const AValue: Byte; const AFileOffset: Int64);
   public
     constructor Create(const AFileNames: TArray<string>; const AReadMethod: TPFSReadMethod);
     destructor Destroy; override;
+
+    // Also at the end of a canceled or failed run, so no handle keeps the file in the file cache
+    procedure CloseCurrentFile;
 
     // Fills ABuffer with the next digits, other characters are dropped. Returns False when all files are read.
     function ReadDigits(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Boolean;
@@ -219,12 +222,14 @@ const
   // For the user interface and the log
   READ_METHOD_NAMES: array[TPFSReadMethod] of string = (
     'ReadFile (Windows API)',
+    'TFileStream (Delphi RTL)',
     'IoRing stream (TSequentialReadOnlyFileStream)',
     'IoRing zero-copy reader (TIORingSequentialReader)',
     'IoRing zero-copy reader, unbuffered'
   );
   // For the -Read: switch of the console version
-  READ_METHOD_SWITCHES: array[TPFSReadMethod] of string = ('ReadFile', 'Stream', 'Reader', 'Unbuffered');
+  READ_METHOD_SWITCHES: array[TPFSReadMethod] of string = ('ReadFile', 'FileStream', 'IORingStream', 'IORingReader',
+    'IORingUnbuffered');
 
 implementation
 
@@ -307,8 +312,8 @@ begin
   FFileIndex := -1;
   FFileOpen := False;
   FHandle := INVALID_HANDLE_VALUE;
-  FIORingStream := nil;
   FReadMethod := AReadMethod;
+  FStream := nil;
 
   for var LFileName in FFileNames do
   begin
@@ -348,8 +353,10 @@ begin
         if FHandle = INVALID_HANDLE_VALUE then
           RaiseLastOSError;
       end;
+    rmFileStream:
+      FStream := TFileStream.Create(FFileNames[FFileIndex], fmOpenRead or fmShareDenyWrite);
     rmIORingStream:
-      FIORingStream := TSequentialReadOnlyFileStream.Create(FFileNames[FFileIndex]);
+      FStream := TSequentialReadOnlyFileStream.Create(FFileNames[FFileIndex]);
     rmIORingReader:
       FIORingReader.Open(FFileNames[FFileIndex]);
     rmIORingReaderUnbuffered:
@@ -424,7 +431,7 @@ begin
     Result := LBytesRead;
   end
   else
-    Result := FIORingStream.Read(ABuffer^, ACapacity);
+    Result := FStream.Read(ABuffer^, ACapacity);
 
   ADigitCount := CompactDigits(ABuffer, ABuffer, Result);
   FileBytesRead(Result);
@@ -438,7 +445,7 @@ begin
     FHandle := INVALID_HANDLE_VALUE;
   end;
 
-  FreeAndNil(FIORingStream);
+  FreeAndNil(FStream);
   FIORingReader.Close;
   FFileOpen := False;
 end;
@@ -1082,7 +1089,13 @@ end;
 procedure TPiFalseStartSearcher.SearchThreadProc;
 begin
   try
-    Search;
+    try
+      Search;
+    finally
+      // A canceled or failed run stops in the middle of a file, it must not stay open (and in the file cache)
+      FReader.CloseCurrentFile;
+    end;
+
     FinishRun(rsFinished, '');
   except
     on E: Exception do
@@ -1109,7 +1122,7 @@ begin
   if FBufferSize < 1024 * 1024 then
     raise EArgumentException.Create('BufferSize must be at least 1 MB');
 
-  if (FReadMethod <> rmReadFile) and not IORingAvailable then
+  if not (FReadMethod in [rmReadFile, rmFileStream]) and not IORingAvailable then
     raise ENotSupportedException.Create('IoRing is not available, it needs Windows 11 24H2 or newer');
 end;
 

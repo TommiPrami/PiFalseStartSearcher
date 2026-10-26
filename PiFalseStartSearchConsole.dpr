@@ -185,7 +185,7 @@ begin
   WriteLn('  -Read:Method     How the files are read (default ReadFile):');
 
   for var LReadMethod := Low(TPFSReadMethod) to High(TPFSReadMethod) do
-    WriteLn(Format('                     %-10s  %s', [READ_METHOD_SWITCHES[LReadMethod], READ_METHOD_NAMES[LReadMethod]]));
+    WriteLn(Format('                     %-16s  %s', [READ_METHOD_SWITCHES[LReadMethod], READ_METHOD_NAMES[LReadMethod]]));
 
   WriteLn('  -SelfLocating    Also search self-locating strings (digits at position P spell P)');
   WriteLn('  -SummaryFalseStarts  List the false starts of the -List length in the summary, the first 1 000');

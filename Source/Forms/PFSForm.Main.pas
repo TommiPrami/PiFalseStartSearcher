@@ -3,9 +3,9 @@
 interface
 
 uses
-  Winapi.Messages, Winapi.Windows, System.Actions, System.Classes, System.SysUtils, System.UITypes, System.Variants,
-  Vcl.ActnList, Vcl.Controls, Vcl.Dialogs, Vcl.ExtCtrls, Vcl.Forms, Vcl.Graphics, Vcl.Samples.Spin, Vcl.StdCtrls,
-  PFSUnit.FalseStartSearch, PFSUnit.Report, PFSUnit.RunLog;
+  Winapi.Messages, Winapi.Windows, System.Actions, System.Classes, System.SysUtils, System.UITypes, System.Variants, Vcl.ActnList,
+  Vcl.Controls, Vcl.Dialogs, Vcl.ExtCtrls, Vcl.Forms, Vcl.Graphics, Vcl.Samples.Spin, Vcl.StdCtrls, PFSUnit.FalseStartSearch,
+  PFSUnit.Report, PFSUnit.RunLog;
 
 type
   TPFSMainForm = class(TForm)
@@ -19,6 +19,7 @@ type
     ButtonRun: TButton;
     ButtonStopRun: TButton;
     CheckBoxContinuationFiles: TCheckBox;
+    CheckBoxFlushAfterRun: TCheckBox;
     CheckBoxListFalseStarts: TCheckBox;
     CheckBoxOnlyNewLongest: TCheckBox;
     CheckBoxSelfLocating: TCheckBox;
@@ -54,6 +55,7 @@ type
     function GetFileNames: TArray<string>;
     function GetListedKinds: TPFSMatchKinds;
     procedure FalseStartFound(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
+    procedure FlushFileCache(const AFileNames: TArray<string>);
     procedure SearchEnded(const APiSearcher: TPiFalseStartSearcher);
     procedure SetRunning(const ARunning: Boolean);
   end;
@@ -85,10 +87,7 @@ end;
 
 procedure TPFSMainForm.ActionFlushFileCacheExecute(Sender: TObject);
 begin
-  var LFileNames := GetFileNames;
-
-  PurgeFileCache(LFileNames);
-  FRunLog.LogFileCachePurged(LFileNames);
+  FlushFileCache(GetFileNames);
 end;
 
 procedure TPFSMainForm.ActionFlushFileCacheUpdate(Sender: TObject);
@@ -162,6 +161,12 @@ begin
   FreeAndNil(FRunLog);
 end;
 
+procedure TPFSMainForm.FlushFileCache(const AFileNames: TArray<string>);
+begin
+  PurgeFileCache(AFileNames);
+  FRunLog.LogFileCachePurged(AFileNames);
+end;
+
 function TPFSMainForm.GetFileNames: TArray<string>;
 begin
   if CheckBoxContinuationFiles.Checked then
@@ -185,6 +190,10 @@ procedure TPFSMainForm.SearchEnded(const APiSearcher: TPiFalseStartSearcher);
 begin
   SetRunning(False);
   FRunLog.LogRunEnded(APiSearcher, GetListedKinds);
+
+  // The files of this run, the file name may have been edited meanwhile
+  if CheckBoxFlushAfterRun.Checked then
+    FlushFileCache(APiSearcher.FileNames);
 end;
 
 procedure TPFSMainForm.SetRunning(const ARunning: Boolean);

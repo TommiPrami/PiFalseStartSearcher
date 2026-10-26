@@ -57,6 +57,23 @@ object PFSMainForm: TPFSMainForm
       ShowHint = True
       TabOrder = 2
     end
+    object CheckBoxFlushAfterRun: TCheckBox
+      AlignWithMargins = True
+      Left = 3
+      Top = 108
+      Width = 100
+      Height = 17
+      Hint = 
+        'Removes the files of a run from the Windows file cache when the ' +
+        'run ends, so the next run reads them from the disk too.'
+      Align = alTop
+      Caption = 'After every run'
+      Checked = True
+      ParentShowHint = False
+      ShowHint = True
+      State = cbChecked
+      TabOrder = 3
+    end
   end
   object PanelLog: TPanel
     Left = 0
@@ -71,7 +88,7 @@ object PFSMainForm: TPFSMainForm
       AlignWithMargins = True
       Left = 3
       Top = 108
-      Width = 887
+      Width = 73
       Height = 15
       Align = alTop
       Caption = 'LabelProgress'
@@ -115,6 +132,14 @@ object PFSMainForm: TPFSMainForm
       BevelOuter = bvNone
       ShowCaption = False
       TabOrder = 1
+      object LabelReadMethod: TLabel
+        Left = 6
+        Top = 53
+        Width = 46
+        Height = 15
+        Caption = 'Reading:'
+        FocusControl = ComboBoxReadMethod
+      end
       object CheckBoxContinuationFiles: TCheckBox
         Left = 6
         Top = 4
@@ -133,20 +158,12 @@ object PFSMainForm: TPFSMainForm
         Caption = 'Also search self-locating strings (digits at position P spell P)'
         TabOrder = 1
       end
-      object LabelReadMethod: TLabel
-        Left = 6
-        Top = 53
-        Width = 47
-        Height = 15
-        Caption = 'Reading:'
-        FocusControl = ComboBoxReadMethod
-      end
       object ComboBoxReadMethod: TComboBox
         Left = 60
         Top = 49
         Width = 356
         Height = 23
-        Hint =
+        Hint = 
           'How the digit files are read. All of them find the same false st' +
           'arts; the summary shows the time and speed, for comparing them.'
         Style = csDropDownList
@@ -159,7 +176,7 @@ object PFSMainForm: TPFSMainForm
         Top = 6
         Width = 170
         Height = 17
-        Hint =
+        Hint = 
           'Lists the false starts of at least this length in the summary at' +
           ' the end of the run, the first 1 000 of them. Without "Log only ' +
           'a new longest false start" they are also logged as found.'
@@ -237,10 +254,11 @@ object PFSMainForm: TPFSMainForm
     end
     object ActionFlushFileCache: TAction
       Caption = 'Flush file cache'
-      Hint =
-        'Removes the digit files (with the follow-up files, if they are se' +
-        'arched) from the Windows file cache, so the next run reads them f' +
-        'rom the disk. Does not work while another program has them open.'
+      Hint = 
+        'Removes the digit files (with the follow-up files, if they are s' +
+        'earched) from the Windows file cache, so the next run reads them' +
+        ' from the disk. Does not work while another program has them ope' +
+        'n.'
       OnExecute = ActionFlushFileCacheExecute
       OnUpdate = ActionFlushFileCacheUpdate
     end
