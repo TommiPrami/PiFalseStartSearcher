@@ -1,4 +1,4 @@
-# PiFalseStartSearcher
+﻿# PiFalseStartSearcher
 
 A tiny tool to find the longest "false start" of Pi: a place in the decimals where the digits start again as "31415926...". It just occurred to me to wonder what the longest false start is, and going through a trillion decimals by hand seemed a bit daunting.
 
