@@ -228,11 +228,12 @@ begin
     ALines.Add(Format('Elapsed: %s (%s s), %s GB/s', [FormatElapsed(LProgress.ElapsedSeconds),
       FormatFloat('0.00', LProgress.ElapsedSeconds), FormatFloat('0.00', LBytesPerSecond / BYTES_IN_GB)]));
     // Where the time went: reading runs in the background while the previous buffer is handled
-    if APiSearcher.ReadMethod in [rmIORingParallel, rmIORingParallelUnbuffered] then
+    if APiSearcher.ReadMethod in PARALLEL_READ_METHODS then
       // Added up over the workers, so more than the elapsed time
-      ALines.Add(Format('Added up over %d workers: waiting for reads %s s, dropping non-digits %s s, scanning %s s',
-        [PARALLEL_WORKER_COUNT, FormatFloat('0.00', LProgress.ReadWaitSeconds),
-        FormatFloat('0.00', LProgress.CompactSeconds), FormatFloat('0.00', LProgress.ScanSeconds)]))
+      ALines.Add(Format('Added up over %d workers: waiting for reads %s s, dropping non-digits %s s, waiting for their ' +
+        'turn %s s, scanning %s s', [PARALLEL_WORKER_COUNT, FormatFloat('0.00', LProgress.ReadWaitSeconds),
+        FormatFloat('0.00', LProgress.CompactSeconds), FormatFloat('0.00', LProgress.OrderWaitSeconds),
+        FormatFloat('0.00', LProgress.ScanSeconds)]))
     else if APiSearcher.ReadMethod in [rmIORingReader, rmIORingReaderUnbuffered] then
     begin
       ALines.Add(Format('Scanning %s s, waiting for reads %s s', [FormatFloat('0.00', LProgress.ScanSeconds),

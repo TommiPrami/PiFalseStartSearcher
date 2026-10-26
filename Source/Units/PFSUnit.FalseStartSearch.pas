@@ -32,7 +32,7 @@ interface
 
 uses
   System.Classes, System.Diagnostics, System.Generics.Collections, System.SyncObjs, System.SysUtils, System.Threading,
-  PIRUnit.SequentialReader, PIRUnit.Streams;
+  PIRUnit.Engine, PIRUnit.SequentialReader, PIRUnit.Streams;
 
 const
   // A longer list would only choke the log, the statistics have the counts of all of them
@@ -76,6 +76,9 @@ type
     DigitsScanned: Int64;
     ElapsedSeconds: Double;
     LongestMatch: Integer;
+    { The parallel search, added up over the workers: waiting for their block's turn to get its digit index, that is
+      for the blocks before it to drop their non-digits }
+    OrderWaitSeconds: Double;
     // Reading, in the background while the previous buffer is handled
     ReadSeconds: Double;
     // The scan waiting for the read of the next buffer, and the first read. Near 0: the scan is the limit.
@@ -100,10 +103,13 @@ type
     rmIORingReader,          // TIORingSequentialReader, digits copied straight from its buffers
     rmIORingReaderUnbuffered, // the same, past the file cache
     rmIORingParallel,         // TIORingEngine: PARALLEL_WORKER_COUNT workers read, drop and scan blocks of the file
-    rmIORingParallelUnbuffered // the same, past the file cache
+    rmIORingParallelUnbuffered, // the same, past the file cache
+    rmIORingReaderParallel,   // the same workers, the blocks are chunks of one shared TIORingSequentialReader
+    rmIORingReaderParallelUnbuffered // the same, past the file cache
   );
 
   TRunStatus = (rsNone, rsRunning, rsCanceled, rsError, rsFinished);
+
 
   // What dropping the non-digits of a piece of a file found. One per thread, merged in file order.
   TPFSCompactState = record
@@ -206,6 +212,7 @@ type
     FReadTicks: Int64;
     FReadWaitTicks: Int64;
     FScanTicks: Int64;
+    FOrderWaitTicks: Int64;
     FSearchSelfLocating: Boolean;
     FStatistics: TPFSLengthStatistics;
     FStatus: TRunStatus;
@@ -227,7 +234,13 @@ type
     procedure FinishRun(const AStatus: TRunStatus; const AErrorMessage: string);
     procedure LoadPattern(const AFileName: string);
     procedure MergeSliceResults(const AResults: TArray<TPFSSliceResult>; const AScanCount: Integer);
+    // AStateObject: a TPFSParallelState (declared in the implementation)
+    function ProcessParallelBlock(const AStateObject: TObject; const AIndex: Integer; const AData: PByte;
+      const AByteCount: Integer; const AWaitTicks: Int64): Boolean;
     procedure QueueMatch(const AMatch: TPFSMatch);
+    procedure RunParallelEngineWorker(const AStateObject: TObject; const AEngine: TIORingEngine; const AFile: THandle);
+    // AReader: the shared TIORingSequentialReader
+    procedure RunParallelReaderWorker(const AStateObject: TObject; const AReader: Pointer);
     procedure ScanBuffer(const AData: PByte; const ADataLength, AScanCount: Integer; const ADigitBase: Int64);
     procedure ScanSlice(const AData: PByte; const ADataLength, AFrom, ATo: Integer; const ADigitBase: Int64;
       var AResult: TPFSSliceResult);
@@ -275,6 +288,9 @@ type
   end;
 
 const
+  // The read methods of the parallel search (TPiFalseStartSearcher.SearchParallel)
+  PARALLEL_READ_METHODS = [rmIORingParallel, rmIORingParallelUnbuffered, rmIORingReaderParallel,
+    rmIORingReaderParallelUnbuffered];
   // For the user interface and the log
   READ_METHOD_NAMES: array[TPFSReadMethod] of string = (
     'ReadFile (Windows API)',
@@ -284,16 +300,19 @@ const
     'IoRing zero-copy reader (TIORingSequentialReader)',
     'IoRing zero-copy reader, unbuffered',
     'IoRing engine, parallel (TIORingEngine)',
-    'IoRing engine, parallel, unbuffered'
+    'IoRing engine, parallel, unbuffered',
+    'IoRing zero-copy reader, parallel (several chunks at once)',
+    'IoRing zero-copy reader, parallel, unbuffered'
   );
   // For the -Read: switch of the console version
   READ_METHOD_SWITCHES: array[TPFSReadMethod] of string = ('ReadFile', 'FileStream', 'IORingStream',
-    'IORingStreamUnbuffered', 'IORingReader', 'IORingReaderUnbuffered', 'IORingParallel', 'IORingParallelUnbuffered');
+    'IORingStreamUnbuffered', 'IORingReader', 'IORingReaderUnbuffered', 'IORingParallel', 'IORingParallelUnbuffered',
+    'IORingReaderParallel', 'IORingReaderParallelUnbuffered');
 
 implementation
 
 uses
-  Winapi.Windows, System.Generics.Defaults, System.IOUtils, System.Math, PIRUnit.Engine, PIRUnit.IORing;
+  Winapi.Windows, System.Generics.Defaults, System.IOUtils, System.Math, PIRUnit.IORing;
 
 const
   DEFAULT_BUFFER_SIZE = 64 * 1024 * 1024;
@@ -992,6 +1011,7 @@ begin
     Result.ReadSeconds := FReadTicks / TStopwatch.Frequency;
     Result.ReadWaitSeconds := FReadWaitTicks / TStopwatch.Frequency;
     Result.ScanSeconds := FScanTicks / TStopwatch.Frequency;
+    Result.OrderWaitSeconds := TInterlocked.Read(FOrderWaitTicks) / TStopwatch.Frequency;
   finally
     FLock.Release;
   end;
@@ -1429,9 +1449,9 @@ begin
     ScanBuffer(@LBuffers[LCurrent][LReadStarts[LCurrent] - LCarryLength], LCarryLength, LCarryLength, LDigitBase);
 end;
 
-{ The parallel engine search. PARALLEL_WORKER_COUNT workers each take the next block of the file, read it through the
-  engine (the read of their next block is already in flight meanwhile), drop its non-digits and scan the positions that
-  have their whole lookahead in the block. A block's digit index is known once the blocks before it have dropped their
+{ The parallel search. PARALLEL_WORKER_COUNT workers each take the next block of the file - read through the engine
+  (the read of their next block already in flight meanwhile), or a chunk of the shared zero-copy reader - drop its
+  non-digits and scan the positions that have their whole lookahead in the block. A block's digit index is known once the blocks before it have dropped their
   non-digits, so the workers take it in block order (TPFSParallelState.TakeBase). This thread merges the results in
   file order and scans the seams: the last digits of a block with the first digits of the next. Every byte of the file
   is read once, no reads overlap. }
@@ -1444,183 +1464,277 @@ var
   LEngine: TIORingEngine;
   LFile: THandle;
   LKeptLength: Integer;
+  LReadMethod: TPFSReadMethod;
   LSeam: TBytes;
   LSeamScan: Integer;
+  LSequentialReader: TIORingSequentialReader;
   LState: TPFSParallelState;
   LTasks: TArray<ITask>;
   LWorker: TProc;
 begin
   LBlockCount := Integer((FReader.BytesTotal + PARALLEL_BLOCK_SIZE - 1) div PARALLEL_BLOCK_SIZE);
-  LFile := TIORingPlatform.OpenFileForRead(FFileName, FReadMethod = rmIORingParallelUnbuffered, False);
+  LReadMethod := FReadMethod;
+  LEngine := nil;
+  LFile := INVALID_HANDLE_VALUE;
+
   try
-    // Each worker keeps two reads at most: its block's and the next one's
-    LEngine := TIORingEngine.Create(4 * PARALLEL_WORKER_COUNT);
+    if LReadMethod in [rmIORingReaderParallel, rmIORingReaderParallelUnbuffered] then
+    begin
+      { The reader's chunks are the blocks: a buffer each, two per worker, like the engine's reads below. The buffer
+        size is the block size, so a chunk starts at a block boundary. }
+      if LReadMethod = rmIORingReaderParallelUnbuffered then
+        LSequentialReader.Open(FFileName, [sroUnbuffered], PARALLEL_BLOCK_SIZE, 2 * PARALLEL_WORKER_COUNT)
+      else
+        LSequentialReader.Open(FFileName, [], PARALLEL_BLOCK_SIZE, 2 * PARALLEL_WORKER_COUNT);
+    end
+    else
+    begin
+      LFile := TIORingPlatform.OpenFileForRead(FFileName, LReadMethod = rmIORingParallelUnbuffered, False);
+      // Each worker keeps two reads at most: its block's and the next one's
+      LEngine := TIORingEngine.Create(4 * PARALLEL_WORKER_COUNT);
+    end;
+
+    LState := TPFSParallelState.Create(LBlockCount);
     try
-      LState := TPFSParallelState.Create(LBlockCount);
-      try
+      if Assigned(LEngine) then
         LWorker :=
           procedure
-          var
-            LBase: Int64;
-            LBuffers: array[0..1] of PByte;
-            LCompletion: TIORingCompletion;
-            LDigitCount: Integer;
-            LHandles: array[0..1] of TIORingRequestHandle;
-            LHasNext: Boolean;
-            LIndex: Integer;
-            LInFlight: array[0..1] of Boolean;
-            LNextIndex: Integer;
-            LSide: Integer;
-            LStart: Int64;
-            LTarget: ^TPFSParallelBlock;
-            LWaitTicks: Int64;
           begin
-            LBuffers[0] := TIORingPlatform.AllocPages(PARALLEL_BLOCK_SIZE);
-            LBuffers[1] := TIORingPlatform.AllocPages(PARALLEL_BLOCK_SIZE);
-            LInFlight[0] := False;
-            LInFlight[1] := False;
-            try
-              try
-                LSide := 0;
-                LHasNext := LState.ClaimBlock(LIndex);
-
-                if LHasNext then
-                begin
-                  LHandles[LSide] := LEngine.ReadAsync(LFile, LBuffers[LSide]^, PARALLEL_BLOCK_SIZE,
-                    UInt64(LIndex) * PARALLEL_BLOCK_SIZE);
-                  LInFlight[LSide] := True;
-                end;
-
-                while LHasNext do
-                begin
-                  // The next block's read goes on while this one is handled
-                  LHasNext := LState.ClaimBlock(LNextIndex);
-
-                  if LHasNext then
-                  begin
-                    LHandles[1 - LSide] := LEngine.ReadAsync(LFile, LBuffers[1 - LSide]^, PARALLEL_BLOCK_SIZE,
-                      UInt64(LNextIndex) * PARALLEL_BLOCK_SIZE);
-                    LInFlight[1 - LSide] := True;
-                  end;
-
-                  LStart := TStopwatch.GetTimeStamp;
-                  LInFlight[LSide] := False;
-                  LEngine.Wait(LHandles[LSide], LCompletion);
-                  LCompletion.RaiseIfFailed('Read');
-                  LWaitTicks := TStopwatch.GetTimeStamp - LStart;
-                  FReader.AddBytesRead(Integer(LCompletion.BytesTransferred));
-
-                  // The array is not resized while the workers run, so the pointer stays valid
-                  LTarget := @LState.Blocks[LIndex];
-
-                  LStart := TStopwatch.GetTimeStamp;
-                  LTarget^.State := TPFSCompactState.Create(Int64(LIndex) * PARALLEL_BLOCK_SIZE);
-                  LDigitCount := CompactDigits(LBuffers[LSide], LBuffers[LSide], Integer(LCompletion.BytesTransferred),
-                    LTarget^.State);
-                  FReader.AddCompactTicks(TStopwatch.GetTimeStamp - LStart);
-
-                  if not LState.TakeBase(LIndex, LDigitCount, LBase) then
-                    Break;
-
-                  LStart := TStopwatch.GetTimeStamp;
-                  LTarget^.Base := LBase;
-                  LTarget^.ScanCount := Max(0, LDigitCount - FPatternLength + 1);
-                  ScanSlice(LBuffers[LSide], LDigitCount, 0, LTarget^.ScanCount, LBase, LTarget^.Result);
-
-                  SetLength(LTarget^.Head, Min(LDigitCount, FPatternLength - 1));
-                  SetLength(LTarget^.Tail, LDigitCount - LTarget^.ScanCount);
-
-                  if Length(LTarget^.Head) > 0 then
-                    Move(LBuffers[LSide]^, LTarget^.Head[0], Length(LTarget^.Head));
-
-                  if Length(LTarget^.Tail) > 0 then
-                    Move(LBuffers[LSide][LTarget^.ScanCount], LTarget^.Tail[0], Length(LTarget^.Tail));
-
-                  AddTimes(0, LWaitTicks, TStopwatch.GetTimeStamp - LStart);
-                  LState.SetDone(LIndex);
-
-                  LIndex := LNextIndex;
-                  LSide := 1 - LSide;
-                end;
-              except
-                on E: Exception do
-                  LState.Abort(E.Message);
-              end;
-            finally
-              // The buffers may go only after their reads
-              for LSide := 0 to 1 do
-                if LInFlight[LSide] then
-                  LEngine.Wait(LHandles[LSide], LCompletion);
-
-              TIORingPlatform.FreePages(LBuffers[0], PARALLEL_BLOCK_SIZE);
-              TIORingPlatform.FreePages(LBuffers[1], PARALLEL_BLOCK_SIZE);
-            end;
+            RunParallelEngineWorker(LState, LEngine, LFile);
+          end
+      else
+        LWorker :=
+          procedure
+          begin
+            RunParallelReaderWorker(LState, @LSequentialReader);
           end;
 
-        SetLength(LTasks, PARALLEL_WORKER_COUNT);
+      SetLength(LTasks, PARALLEL_WORKER_COUNT);
 
-        for var LIndex := 0 to High(LTasks) do
-          LTasks[LIndex] := TTask.Run(LWorker);
+      for var LIndex := 0 to High(LTasks) do
+        LTasks[LIndex] := TTask.Run(LWorker);
 
-        try
-          LCarry := nil;
-          LCarryBase := 0;
+      try
+        LCarry := nil;
+        LCarryBase := 0;
 
-          // The blocks in file order: first the seam of the digits before the block, then the block's own positions
-          for var LIndex := 0 to LBlockCount - 1 do
+        // The blocks in file order: first the seam of the digits before the block, then the block's own positions
+        for var LIndex := 0 to LBlockCount - 1 do
+        begin
+          while not LState.WaitDone(LIndex, 100) do
           begin
-            while not LState.WaitDone(LIndex, 100) do
-            begin
-              if HasRunEndedStatus then
-                LState.Abort('');
-
-              if LState.Aborted then
-                Break;
-            end;
+            if HasRunEndedStatus then
+              LState.Abort('');
 
             if LState.Aborted then
               Break;
-
-            LBlock := LState.Blocks[LIndex];
-            LState.Blocks[LIndex] := Default(TPFSParallelBlock);
-
-            LSeam := LCarry + LBlock.Head;
-            // The carried digits that now have their whole lookahead, all of them unless the block is tiny
-            LSeamScan := Min(Length(LCarry), Max(0, Length(LSeam) - FPatternLength + 1));
-
-            if LSeamScan > 0 then
-              ScanBuffer(@LSeam[0], Length(LSeam), LSeamScan, LCarryBase);
-
-            MergeSliceResults([LBlock.Result], LBlock.ScanCount);
-            FReader.AddCompactState(LBlock.State);
-
-            LKeptLength := Length(LCarry) - LSeamScan;
-            LCarry := Copy(LCarry, LSeamScan, LKeptLength) + LBlock.Tail;
-            LCarryBase := LBlock.Base + LBlock.ScanCount - LKeptLength;
           end;
 
-          // The last digits of the file. Not aborted here also means all blocks are merged.
-          if not LState.Aborted and not HasRunEndedStatus and (Length(LCarry) > 0) then
-            ScanBuffer(@LCarry[0], Length(LCarry), Length(LCarry), LCarryBase);
-        finally
-          // Ends the workers' waits when the merge stopped early. After a normal end nothing waits anymore. Keeps a
-          // worker's error message.
-          LState.Abort('');
+          if LState.Aborted then
+            Break;
 
-          for var LTask in LTasks do
-            LTask.Wait;
+          LBlock := LState.Blocks[LIndex];
+          LState.Blocks[LIndex] := Default(TPFSParallelBlock);
+
+          LSeam := LCarry + LBlock.Head;
+          // The carried digits that now have their whole lookahead, all of them unless the block is tiny
+          LSeamScan := Min(Length(LCarry), Max(0, Length(LSeam) - FPatternLength + 1));
+
+          if LSeamScan > 0 then
+            ScanBuffer(@LSeam[0], Length(LSeam), LSeamScan, LCarryBase);
+
+          MergeSliceResults([LBlock.Result], LBlock.ScanCount);
+          FReader.AddCompactState(LBlock.State);
+
+          LKeptLength := Length(LCarry) - LSeamScan;
+          LCarry := Copy(LCarry, LSeamScan, LKeptLength) + LBlock.Tail;
+          LCarryBase := LBlock.Base + LBlock.ScanCount - LKeptLength;
         end;
 
-        if not LState.ErrorMessage.IsEmpty then
-          raise EInOutError.Create(LState.ErrorMessage);
+        // The last digits of the file. Not aborted here also means all blocks are merged.
+        if not LState.Aborted and not HasRunEndedStatus and (Length(LCarry) > 0) then
+          ScanBuffer(@LCarry[0], Length(LCarry), Length(LCarry), LCarryBase);
       finally
-        LState.Free;
+        // Ends the workers' waits when the merge stopped early. After a normal end nothing waits anymore. Keeps a
+        // worker's error message.
+        LState.Abort('');
+
+        for var LTask in LTasks do
+          LTask.Wait;
       end;
+
+      if not LState.ErrorMessage.IsEmpty then
+        raise EInOutError.Create(LState.ErrorMessage);
     finally
-      LEngine.Free;
+      LState.Free;
     end;
   finally
-    CloseHandle(LFile);
+    LEngine.Free;
+
+    if LFile <> INVALID_HANDLE_VALUE then
+      CloseHandle(LFile);
+
+    // Also at the end of scope; here the order is clear: after the workers
+    LSequentialReader.Close;
+  end;
+end;
+
+{ One block of the parallel search, AByteCount bytes at AData: drops its non-digits in place, takes its digit index
+  in block order, scans the positions that have their whole lookahead in the block and keeps its first and last
+  digits for the seams. False: the search was aborted meanwhile. }
+function TPiFalseStartSearcher.ProcessParallelBlock(const AStateObject: TObject; const AIndex: Integer;
+  const AData: PByte; const AByteCount: Integer; const AWaitTicks: Int64): Boolean;
+var
+  LBase: Int64;
+  LDigitCount: Integer;
+  LStart: Int64;
+  LState: TPFSParallelState;
+  LTarget: ^TPFSParallelBlock;
+begin
+  LState := TPFSParallelState(AStateObject);
+  // The array is not resized while the workers run, so the pointer stays valid
+  LTarget := @LState.Blocks[AIndex];
+
+  LStart := TStopwatch.GetTimeStamp;
+  LTarget^.State := TPFSCompactState.Create(Int64(AIndex) * PARALLEL_BLOCK_SIZE);
+  LDigitCount := CompactDigits(AData, AData, AByteCount, LTarget^.State);
+  FReader.AddCompactTicks(TStopwatch.GetTimeStamp - LStart);
+
+  LStart := TStopwatch.GetTimeStamp;
+
+  if not LState.TakeBase(AIndex, LDigitCount, LBase) then
+    Exit(False);
+
+  TInterlocked.Add(FOrderWaitTicks, TStopwatch.GetTimeStamp - LStart);
+
+  LStart := TStopwatch.GetTimeStamp;
+  LTarget^.Base := LBase;
+  LTarget^.ScanCount := Max(0, LDigitCount - FPatternLength + 1);
+  ScanSlice(AData, LDigitCount, 0, LTarget^.ScanCount, LBase, LTarget^.Result);
+
+  SetLength(LTarget^.Head, Min(LDigitCount, FPatternLength - 1));
+  SetLength(LTarget^.Tail, LDigitCount - LTarget^.ScanCount);
+
+  if Length(LTarget^.Head) > 0 then
+    Move(AData^, LTarget^.Head[0], Length(LTarget^.Head));
+
+  if Length(LTarget^.Tail) > 0 then
+    Move(AData[LTarget^.ScanCount], LTarget^.Tail[0], Length(LTarget^.Tail));
+
+  AddTimes(0, AWaitTicks, TStopwatch.GetTimeStamp - LStart);
+  LState.SetDone(AIndex);
+
+  Result := True;
+end;
+
+// A worker of the engine methods: reads its blocks itself, the next one's read in flight while it handles one
+procedure TPiFalseStartSearcher.RunParallelEngineWorker(const AStateObject: TObject; const AEngine: TIORingEngine;
+  const AFile: THandle);
+var
+  LBuffers: array[0..1] of PByte;
+  LCompletion: TIORingCompletion;
+  LHandles: array[0..1] of TIORingRequestHandle;
+  LHasNext: Boolean;
+  LIndex: Integer;
+  LInFlight: array[0..1] of Boolean;
+  LNextIndex: Integer;
+  LSide: Integer;
+  LStart: Int64;
+  LState: TPFSParallelState;
+  LWaitTicks: Int64;
+begin
+  LState := TPFSParallelState(AStateObject);
+  LBuffers[0] := TIORingPlatform.AllocPages(PARALLEL_BLOCK_SIZE);
+  LBuffers[1] := TIORingPlatform.AllocPages(PARALLEL_BLOCK_SIZE);
+  LInFlight[0] := False;
+  LInFlight[1] := False;
+  try
+    try
+      LSide := 0;
+      LHasNext := LState.ClaimBlock(LIndex);
+
+      if LHasNext then
+      begin
+        LHandles[LSide] := AEngine.ReadAsync(AFile, LBuffers[LSide]^, PARALLEL_BLOCK_SIZE,
+          UInt64(LIndex) * PARALLEL_BLOCK_SIZE);
+        LInFlight[LSide] := True;
+      end;
+
+      while LHasNext do
+      begin
+        // The next block's read goes on while this one is handled
+        LHasNext := LState.ClaimBlock(LNextIndex);
+
+        if LHasNext then
+        begin
+          LHandles[1 - LSide] := AEngine.ReadAsync(AFile, LBuffers[1 - LSide]^, PARALLEL_BLOCK_SIZE,
+            UInt64(LNextIndex) * PARALLEL_BLOCK_SIZE);
+          LInFlight[1 - LSide] := True;
+        end;
+
+        LStart := TStopwatch.GetTimeStamp;
+        LInFlight[LSide] := False;
+        AEngine.Wait(LHandles[LSide], LCompletion);
+        LCompletion.RaiseIfFailed('Read');
+        LWaitTicks := TStopwatch.GetTimeStamp - LStart;
+        FReader.AddBytesRead(Integer(LCompletion.BytesTransferred));
+
+        if not ProcessParallelBlock(LState, LIndex, LBuffers[LSide], Integer(LCompletion.BytesTransferred),
+          LWaitTicks)
+        then
+          Break;
+
+        LIndex := LNextIndex;
+        LSide := 1 - LSide;
+      end;
+    except
+      on E: Exception do
+        LState.Abort(E.Message);
+    end;
+  finally
+    // The buffers may go only after their reads
+    for LSide := 0 to 1 do
+      if LInFlight[LSide] then
+        AEngine.Wait(LHandles[LSide], LCompletion);
+
+    TIORingPlatform.FreePages(LBuffers[0], PARALLEL_BLOCK_SIZE);
+    TIORingPlatform.FreePages(LBuffers[1], PARALLEL_BLOCK_SIZE);
+  end;
+end;
+
+{ A worker of the zero-copy reader methods: takes the next chunk of the shared reader (a buffer of its own, in file
+  order, released in any order - Pascal.IOUring's several-chunks calls) and handles it right in the reader's buffer }
+procedure TPiFalseStartSearcher.RunParallelReaderWorker(const AStateObject: TObject; const AReader: Pointer);
+var
+  LChunk: TIORingReaderChunk;
+  LGoOn: Boolean;
+  LReader: ^TIORingSequentialReader;
+  LStart: Int64;
+  LState: TPFSParallelState;
+  LWaitTicks: Int64;
+begin
+  LState := TPFSParallelState(AStateObject);
+  LReader := AReader;
+
+  try
+    repeat
+      LStart := TStopwatch.GetTimeStamp;
+
+      if LState.Aborted or not LReader^.TryAcquireChunk(LChunk) then
+        Break;
+
+      LWaitTicks := TStopwatch.GetTimeStamp - LStart;
+      try
+        FReader.AddBytesRead(Integer(LChunk.Length));
+        LGoOn := ProcessParallelBlock(LState, Integer(LChunk.FileOffset div PARALLEL_BLOCK_SIZE), LChunk.Data,
+          Integer(LChunk.Length), LWaitTicks);
+      finally
+        LReader^.ReleaseChunk(LChunk);
+      end;
+    until not LGoOn;
+  except
+    on E: Exception do
+      LState.Abort(E.Message);
   end;
 end;
 
@@ -1668,7 +1782,7 @@ procedure TPiFalseStartSearcher.SearchThreadProc;
 begin
   try
     try
-      if FReadMethod in [rmIORingParallel, rmIORingParallelUnbuffered] then
+      if FReadMethod in PARALLEL_READ_METHODS then
         SearchParallel
       else
         Search;
