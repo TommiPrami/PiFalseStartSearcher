@@ -23,12 +23,16 @@
 
   Characters other than digits (the decimal point, line breaks) are skipped, so
   digit files with line breaks work too.
+
+  The files can be read in several ways (TPFSReadMethod), to compare plain
+  ReadFile with the IoRing of Pascal.IOUring. All of them find the same matches.
 *)
 
 interface
 
 uses
-  System.Classes, System.Diagnostics, System.Generics.Collections, System.SyncObjs, System.SysUtils, System.Threading;
+  System.Classes, System.Diagnostics, System.Generics.Collections, System.SyncObjs, System.SysUtils, System.Threading,
+  PIRUnit.SequentialReader, PIRUnit.Streams;
 
 const
   // A longer list would only choke the log, the statistics have the counts of all of them
@@ -74,6 +78,14 @@ type
     Statistics: TPFSLengthStatistics;
   end;
 
+  // How the digit files are read
+  TPFSReadMethod = (
+    rmReadFile,               // Windows ReadFile, with the sequential scan hint
+    rmIORingStream,           // TSequentialReadOnlyFileStream, big reads go straight into the buffer
+    rmIORingReader,           // TIORingSequentialReader, digits copied straight from its buffers
+    rmIORingReaderUnbuffered  // the same, past the file cache
+  );
+
   TRunStatus = (rsNone, rsRunning, rsCanceled, rsError, rsFinished);
 
   // Reads the files one after another and hands out only the digits
@@ -84,17 +96,24 @@ type
     FFileIndex: Integer;
     FFileNames: TArray<string>;
     FFileOffset: Int64;
+    FFileOpen: Boolean;
     FFirstUnexpectedChar: string;
     FHandle: THandle;
+    FIORingReader: TIORingSequentialReader;
+    FIORingStream: TSequentialReadOnlyFileStream;
     FNonDigitCount: Int64;
+    FReadMethod: TPFSReadMethod;
     FUnexpectedCharCount: Int64;
+    function CompactDigits(const ASource, ATarget: PByte; const ACount: Integer): Integer;
     function GetBytesRead: Int64;
     function OpenNextFile: Boolean;
+    function ReadFromIORingReader(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
+    function ReadInPlace(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
     procedure CloseCurrentFile;
-    procedure CompactDigits(const ABuffer: PByte; var ACount: Integer);
+    procedure FileBytesRead(const ACount: Integer);
     procedure NonDigitFound(const AValue: Byte; const AFileOffset: Int64);
   public
-    constructor Create(const AFileNames: TArray<string>);
+    constructor Create(const AFileNames: TArray<string>; const AReadMethod: TPFSReadMethod);
     destructor Destroy; override;
 
     // Fills ABuffer with the next digits, other characters are dropped. Returns False when all files are read.
@@ -127,6 +146,7 @@ type
     FPattern: TBytes;
     FPatternLength: Integer;
     FReader: TPFSDigitFileReader;
+    FReadMethod: TPFSReadMethod;
     FSearchSelfLocating: Boolean;
     FStatistics: TPFSLengthStatistics;
     FStatus: TRunStatus;
@@ -187,16 +207,29 @@ type
     property OnSearchEnded: TPFSSearchEndedEvent read FOnSearchEnded write FOnSearchEnded;
     property PatternText: string read GetPatternText;
     property Progress: TPFSProgress read GetProgress;
+    // How the files are read. Does not affect which matches are found. Default = rmReadFile.
+    property ReadMethod: TPFSReadMethod read FReadMethod write FReadMethod;
     // Also look for self-locating strings, the digits at position P spell P (for example "16470" at position 16 470)
     property SearchSelfLocating: Boolean read FSearchSelfLocating write FSearchSelfLocating;
     property Status: TRunStatus read GetStatus;
     property UnexpectedCharCount: Int64 read GetUnexpectedCharCount;
   end;
 
+const
+  // For the user interface and the log
+  READ_METHOD_NAMES: array[TPFSReadMethod] of string = (
+    'ReadFile (Windows API)',
+    'IoRing stream (TSequentialReadOnlyFileStream)',
+    'IoRing zero-copy reader (TIORingSequentialReader)',
+    'IoRing zero-copy reader, unbuffered'
+  );
+  // For the -Read: switch of the console version
+  READ_METHOD_SWITCHES: array[TPFSReadMethod] of string = ('ReadFile', 'Stream', 'Reader', 'Unbuffered');
+
 implementation
 
 uses
-  Winapi.Windows, System.Generics.Defaults, System.IOUtils, System.Math;
+  Winapi.Windows, System.Generics.Defaults, System.IOUtils, System.Math, PIRUnit.IORing;
 
 const
   DEFAULT_BUFFER_SIZE = 64 * 1024 * 1024;
@@ -266,13 +299,16 @@ end;
 
 { TPFSDigitFileReader }
 
-constructor TPFSDigitFileReader.Create(const AFileNames: TArray<string>);
+constructor TPFSDigitFileReader.Create(const AFileNames: TArray<string>; const AReadMethod: TPFSReadMethod);
 begin
   inherited Create;
 
   FFileNames := Copy(AFileNames);
   FFileIndex := -1;
+  FFileOpen := False;
   FHandle := INVALID_HANDLE_VALUE;
+  FIORingStream := nil;
+  FReadMethod := AReadMethod;
 
   for var LFileName in FFileNames do
   begin
@@ -303,28 +339,42 @@ begin
   if not Result then
     Exit;
 
-  FHandle := CreateFile(PChar(FFileNames[FFileIndex]), GENERIC_READ, FILE_SHARE_READ, nil, OPEN_EXISTING,
-    FILE_FLAG_SEQUENTIAL_SCAN, 0);
+  case FReadMethod of
+    rmReadFile:
+      begin
+        FHandle := CreateFile(PChar(FFileNames[FFileIndex]), GENERIC_READ, FILE_SHARE_READ, nil, OPEN_EXISTING,
+          FILE_FLAG_SEQUENTIAL_SCAN, 0);
 
-  if FHandle = INVALID_HANDLE_VALUE then
-    RaiseLastOSError;
+        if FHandle = INVALID_HANDLE_VALUE then
+          RaiseLastOSError;
+      end;
+    rmIORingStream:
+      FIORingStream := TSequentialReadOnlyFileStream.Create(FFileNames[FFileIndex]);
+    rmIORingReader:
+      FIORingReader.Open(FFileNames[FFileIndex]);
+    rmIORingReaderUnbuffered:
+      FIORingReader.Open(FFileNames[FFileIndex], [sroUnbuffered]);
+  end;
 
+  FFileOpen := True;
   FFileOffset := 0;
 end;
 
 function TPFSDigitFileReader.ReadDigits(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Boolean;
 var
-  LBytesRead: DWORD;
+  LBytesRead: Integer;
 begin
   ADigitCount := 0;
 
   while True do
   begin
-    if (FHandle = INVALID_HANDLE_VALUE) and not OpenNextFile then
+    if not FFileOpen and not OpenNextFile then
       Exit(False);
 
-    if not ReadFile(FHandle, ABuffer^, ACapacity, LBytesRead, nil) then
-      RaiseLastOSError;
+    if FReadMethod in [rmIORingReader, rmIORingReaderUnbuffered] then
+      LBytesRead := ReadFromIORingReader(ABuffer, ACapacity, ADigitCount)
+    else
+      LBytesRead := ReadInPlace(ABuffer, ACapacity, ADigitCount);
 
     if LBytesRead > 0 then
       Break;
@@ -332,13 +382,52 @@ begin
     CloseCurrentFile;
   end;
 
-  ADigitCount := LBytesRead;
-  CompactDigits(ABuffer, ADigitCount);
-
-  Inc(FFileOffset, LBytesRead);
-  TInterlocked.Add(FBytesRead, Int64(LBytesRead));
-
   Result := True;
+end;
+
+// Returns the bytes read from the file, 0 at its end. A chunk is taken whole, so it is taken only while it fits in what
+// is left of ABuffer: the buffer may be filled up to the reader's buffer size short.
+function TPFSDigitFileReader.ReadFromIORingReader(const ABuffer: PByte; const ACapacity: Integer;
+  var ADigitCount: Integer): Integer;
+var
+  LChunk: PByte;
+  LChunkLength: NativeInt;
+begin
+  Result := 0;
+  ADigitCount := 0;
+
+  while (ACapacity - ADigitCount >= Integer(FIORingReader.BufferSize))
+    and FIORingReader.TryAcquireChunk(LChunk, LChunkLength)
+  do
+  begin
+    try
+      Inc(ADigitCount, CompactDigits(LChunk, ABuffer + ADigitCount, LChunkLength));
+    finally
+      FIORingReader.ReleaseChunk;
+    end;
+
+    FileBytesRead(LChunkLength);
+    Inc(Result, LChunkLength);
+  end;
+end;
+
+// Reads into ABuffer and drops the non-digits there. Returns the bytes read from the file, 0 at its end.
+function TPFSDigitFileReader.ReadInPlace(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
+var
+  LBytesRead: DWORD;
+begin
+  if FReadMethod = rmReadFile then
+  begin
+    if not ReadFile(FHandle, ABuffer^, ACapacity, LBytesRead, nil) then
+      RaiseLastOSError;
+
+    Result := LBytesRead;
+  end
+  else
+    Result := FIORingStream.Read(ABuffer^, ACapacity);
+
+  ADigitCount := CompactDigits(ABuffer, ABuffer, Result);
+  FileBytesRead(Result);
 end;
 
 procedure TPFSDigitFileReader.CloseCurrentFile;
@@ -348,9 +437,14 @@ begin
     CloseHandle(FHandle);
     FHandle := INVALID_HANDLE_VALUE;
   end;
+
+  FreeAndNil(FIORingStream);
+  FIORingReader.Close;
+  FFileOpen := False;
 end;
 
-procedure TPFSDigitFileReader.CompactDigits(const ABuffer: PByte; var ACount: Integer);
+// Copies the digits of ASource to ATarget, which may be ASource itself. Returns the number of digits.
+function TPFSDigitFileReader.CompactDigits(const ASource, ATarget: PByte; const ACount: Integer): Integer;
 var
   LByte: Byte;
   LReadIndex: Integer;
@@ -359,18 +453,21 @@ begin
   LReadIndex := 0;
 
   // Fast path, the files are usually digits only
-  while (LReadIndex <= ACount - SizeOf(UInt64)) and IsAllDigits(PUInt64(ABuffer + LReadIndex)^) do
+  while (LReadIndex <= ACount - SizeOf(UInt64)) and IsAllDigits(PUInt64(ASource + LReadIndex)^) do
     Inc(LReadIndex, SizeOf(UInt64));
+
+  if ASource <> ATarget then
+    Move(ASource^, ATarget^, LReadIndex);
 
   LWriteIndex := LReadIndex;
 
   while LReadIndex < ACount do
   begin
-    LByte := ABuffer[LReadIndex];
+    LByte := ASource[LReadIndex];
 
     if (LByte >= Ord('0')) and (LByte <= Ord('9')) then
     begin
-      ABuffer[LWriteIndex] := LByte;
+      ATarget[LWriteIndex] := LByte;
       Inc(LWriteIndex);
     end
     else
@@ -379,7 +476,13 @@ begin
     Inc(LReadIndex);
   end;
 
-  ACount := LWriteIndex;
+  Result := LWriteIndex;
+end;
+
+procedure TPFSDigitFileReader.FileBytesRead(const ACount: Integer);
+begin
+  Inc(FFileOffset, ACount);
+  TInterlocked.Add(FBytesRead, Int64(ACount));
 end;
 
 procedure TPFSDigitFileReader.NonDigitFound(const AValue: Byte; const AFileOffset: Int64);
@@ -411,6 +514,7 @@ begin
   FListMatchLength := DEFAULT_LIST_MATCH_LENGTH;
   FMinMatchLength := MIN_MATCH_LENGTH;
   FOnlyNewLongestMatches := True;
+  FReadMethod := rmReadFile;
   FSearchSelfLocating := False;
 end;
 
@@ -686,7 +790,7 @@ begin
   ValidateSettings;
 
   FFileNames := Copy(AFileNames);
-  FReader := TPFSDigitFileReader.Create(FFileNames);
+  FReader := TPFSDigitFileReader.Create(FFileNames, FReadMethod);
   LoadPattern(FFileNames[0]);
 
   FThread := TThread.CreateAnonymousThread(
@@ -1004,6 +1108,9 @@ begin
 
   if FBufferSize < 1024 * 1024 then
     raise EArgumentException.Create('BufferSize must be at least 1 MB');
+
+  if (FReadMethod <> rmReadFile) and not IORingAvailable then
+    raise ENotSupportedException.Create('IoRing is not available, it needs Windows 11 24H2 or newer');
 end;
 
 end.

@@ -120,19 +120,40 @@ object PFSMainForm: TPFSMainForm
         Caption = 'Also search self-locating strings (digits at position P spell P)'
         TabOrder = 1
       end
+      object LabelReadMethod: TLabel
+        Left = 6
+        Top = 53
+        Width = 47
+        Height = 15
+        Caption = 'Reading:'
+        FocusControl = ComboBoxReadMethod
+      end
+      object ComboBoxReadMethod: TComboBox
+        Left = 60
+        Top = 49
+        Width = 356
+        Height = 23
+        Hint =
+          'How the digit files are read. All of them find the same false st' +
+          'arts; the summary shows the time and speed, for comparing them.'
+        Style = csDropDownList
+        ParentShowHint = False
+        ShowHint = True
+        TabOrder = 2
+      end
       object CheckBoxListFalseStarts: TCheckBox
         Left = 430
         Top = 6
         Width = 170
         Height = 17
-        Hint = 
+        Hint =
           'Lists the false starts of at least this length in the summary at' +
           ' the end of the run, the first 1 000 of them. Without "Log only ' +
           'a new longest false start" they are also logged as found.'
         Caption = 'List false starts of length >='
         ParentShowHint = False
         ShowHint = True
-        TabOrder = 2
+        TabOrder = 3
       end
       object SpinEditListMatchLength: TSpinEdit
         Left = 604
@@ -141,7 +162,7 @@ object PFSMainForm: TPFSMainForm
         Height = 24
         MaxValue = 64
         MinValue = 4
-        TabOrder = 3
+        TabOrder = 4
         Value = 5
       end
       object CheckBoxOnlyNewLongest: TCheckBox
@@ -157,7 +178,7 @@ object PFSMainForm: TPFSMainForm
         ParentShowHint = False
         ShowHint = True
         State = cbChecked
-        TabOrder = 4
+        TabOrder = 5
       end
       object CheckBoxSummaryNewLongest: TCheckBox
         Left = 430
@@ -170,7 +191,7 @@ object PFSMainForm: TPFSMainForm
         Caption = 'List new longest ones in the summary'
         ParentShowHint = False
         ShowHint = True
-        TabOrder = 5
+        TabOrder = 6
       end
     end
     object MemoLog: TMemo

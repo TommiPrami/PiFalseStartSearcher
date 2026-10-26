@@ -95,6 +95,7 @@ begin
     WriteLine('File: ' + LFileName);
 
   WriteLine('Searched prefix: ' + APiSearcher.PatternText);
+  WriteLine('Reading: ' + READ_METHOD_NAMES[APiSearcher.ReadMethod]);
   WriteLine('');
 
   // The new longest lines are only "    4 digits at position ...", they need a heading

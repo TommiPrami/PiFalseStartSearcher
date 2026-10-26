@@ -2,11 +2,11 @@
 
 uses
   Vcl.Forms,
-  PFSForm.Main in 'PFSForm.Main.pas' {PFSMainForm},
-  PFSUnit.FalseStartSearch in 'PFSUnit.FalseStartSearch.pas',
-  PFSUnit.Report in 'PFSUnit.Report.pas',
-  PFSUnit.RunLog in 'PFSUnit.RunLog.pas',
-  PFSUnit.RunLog.Memo in 'PFSUnit.RunLog.Memo.pas';
+  PFSForm.Main in 'Source\Forms\PFSForm.Main.pas' {PFSMainForm},
+  PFSUnit.FalseStartSearch in 'Source\Units\PFSUnit.FalseStartSearch.pas',
+  PFSUnit.Report in 'Source\Units\PFSUnit.Report.pas',
+  PFSUnit.RunLog in 'Source\Units\PFSUnit.RunLog.pas',
+  PFSUnit.RunLog.Memo in 'Source\Units\PFSUnit.RunLog.Memo.pas';
 
 {$R *.res}
 

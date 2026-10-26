@@ -4,9 +4,9 @@
 
 uses
   Winapi.Windows, System.Classes, System.SysUtils,
-  PFSUnit.FalseStartSearch in 'PFSUnit.FalseStartSearch.pas',
-  PFSUnit.Report in 'PFSUnit.Report.pas',
-  PFSUnit.RunLog in 'PFSUnit.RunLog.pas';
+  PFSUnit.FalseStartSearch in 'Source\Units\PFSUnit.FalseStartSearch.pas',
+  PFSUnit.Report in 'Source\Units\PFSUnit.Report.pas',
+  PFSUnit.RunLog in 'Source\Units\PFSUnit.RunLog.pas';
 
 type
   TPFSConsoleRunner = class(TObject)
@@ -27,6 +27,15 @@ type
 
 var
   GPiSearcher: TPiFalseStartSearcher = nil;
+
+function ParseReadMethod(const AValue: string): TPFSReadMethod;
+begin
+  for var LReadMethod := Low(TPFSReadMethod) to High(TPFSReadMethod) do
+    if SameText(AValue, READ_METHOD_SWITCHES[LReadMethod]) then
+      Exit(LReadMethod);
+
+  raise EArgumentException.CreateFmt('Unknown read method "%s"', [AValue]);
+end;
 
 function ConsoleCtrlHandler(ACtrlType: DWORD): BOOL; stdcall;
 begin
@@ -82,6 +91,8 @@ begin
     AContinuationFiles := False
   else if SameText(LName, 'Out') then
     FRunLog.SummaryFileName := LValue
+  else if SameText(LName, 'Read') then
+    FPiSearcher.ReadMethod := ParseReadMethod(LValue)
   else if SameText(LName, 'SelfLocating') then
     FPiSearcher.SearchSelfLocating := True
   else if SameText(LName, 'SummaryFalseStarts') then
@@ -160,6 +171,11 @@ begin
   WriteLn('  -Min:N           Count false starts from N digits up (default and minimum 4)');
   WriteLn('  -NoContinuation  Do not continue with the numbered follow-up files (_02, _03, ...)');
   WriteLn('  -Out:FileName    Also save the summary to a file');
+  WriteLn('  -Read:Method     How the files are read (default ReadFile):');
+
+  for var LReadMethod := Low(TPFSReadMethod) to High(TPFSReadMethod) do
+    WriteLn(Format('                     %-10s  %s', [READ_METHOD_SWITCHES[LReadMethod], READ_METHOD_NAMES[LReadMethod]]));
+
   WriteLn('  -SelfLocating    Also search self-locating strings (digits at position P spell P)');
   WriteLn('  -SummaryFalseStarts  List the false starts of the -List length in the summary, the first 1 000');
   WriteLn('  -SummaryNewLongest   List the new longest false starts in the summary');

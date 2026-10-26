@@ -199,6 +199,7 @@ end;
 
 procedure AddSummary(const APiSearcher: TPiFalseStartSearcher; const ALines: TStrings; const AListedKinds: TPFSMatchKinds);
 var
+  LBytesPerSecond: Double;
   LLongestMatch: Integer;
   LProgress: TPFSProgress;
   LStatistics: TPFSLengthStatistics;
@@ -206,6 +207,10 @@ begin
   LProgress := APiSearcher.Progress;
   LLongestMatch := LProgress.LongestMatch;
   LStatistics := APiSearcher.GetStatistics;
+  LBytesPerSecond := 0.00;
+
+  if LProgress.ElapsedSeconds > 0 then
+    LBytesPerSecond := LProgress.BytesRead / LProgress.ElapsedSeconds;
 
   ALines.BeginUpdate;
   try
@@ -218,7 +223,10 @@ begin
       ALines.Add(Format('WARNING: %s unexpected characters, first one %s',
         [IntToStrTS(APiSearcher.UnexpectedCharCount), APiSearcher.FirstUnexpectedChar]));
 
-    ALines.Add('Elapsed: ' + FormatElapsed(LProgress.ElapsedSeconds));
+    ALines.Add('Reading: ' + READ_METHOD_NAMES[APiSearcher.ReadMethod]);
+    // Seconds with decimals and the speed, to compare the reading methods
+    ALines.Add(Format('Elapsed: %s (%s s), %s GB/s', [FormatElapsed(LProgress.ElapsedSeconds),
+      FormatFloat('0.00', LProgress.ElapsedSeconds), FormatFloat('0.00', LBytesPerSecond / BYTES_IN_GB)]));
 
     AddStatisticsTable(APiSearcher, ALines);
 

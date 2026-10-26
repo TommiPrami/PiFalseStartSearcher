@@ -2,7 +2,7 @@
 
 uses
   Vcl.Forms,
-  PFSForm.Main in 'PFSForm.Main.pas' {PFSMainForm};
+  PFSForm.Main in 'Source\Forms\PFSForm.Main.pas' {PFSMainForm};
 
 {$R *.res}
 

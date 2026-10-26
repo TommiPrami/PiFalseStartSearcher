@@ -61,6 +61,7 @@
     <PropertyGroup Condition="'$(Base)'!=''">
         <DCC_DcuOutput>.\$(Platform)\$(Config)</DCC_DcuOutput>
         <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
+        <DCC_UnitSearchPath>Source\Units;Source\3rdParty\Pascal.IOUring\Source\Units;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <DCC_E>false</DCC_E>
         <DCC_N>false</DCC_N>
         <DCC_S>false</DCC_S>
@@ -123,14 +124,14 @@
         <DelphiCompile Include="$(MainSource)">
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
-        <DCCReference Include="PFSForm.Main.pas">
+        <DCCReference Include="Source\Forms\PFSForm.Main.pas">
             <Form>PFSMainForm</Form>
             <FormType>dfm</FormType>
         </DCCReference>
-        <DCCReference Include="PFSUnit.FalseStartSearch.pas"/>
-        <DCCReference Include="PFSUnit.Report.pas"/>
-        <DCCReference Include="PFSUnit.RunLog.pas"/>
-        <DCCReference Include="PFSUnit.RunLog.Memo.pas"/>
+        <DCCReference Include="Source\Units\PFSUnit.FalseStartSearch.pas"/>
+        <DCCReference Include="Source\Units\PFSUnit.Report.pas"/>
+        <DCCReference Include="Source\Units\PFSUnit.RunLog.pas"/>
+        <DCCReference Include="Source\Units\PFSUnit.RunLog.Memo.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

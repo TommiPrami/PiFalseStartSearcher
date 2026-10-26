@@ -21,8 +21,10 @@ type
     CheckBoxOnlyNewLongest: TCheckBox;
     CheckBoxSelfLocating: TCheckBox;
     CheckBoxSummaryNewLongest: TCheckBox;
+    ComboBoxReadMethod: TComboBox;
     EditFileName: TEdit;
     LabelProgress: TLabel;
+    LabelReadMethod: TLabel;
     MemoLog: TMemo;
     OpenDialogPiFile: TOpenDialog;
     PanelButtons: TPanel;
@@ -89,6 +91,7 @@ begin
   try
     FPiSearcher.ListMatchLength := SpinEditListMatchLength.Value;
     FPiSearcher.OnlyNewLongestMatches := CheckBoxOnlyNewLongest.Checked;
+    FPiSearcher.ReadMethod := TPFSReadMethod(ComboBoxReadMethod.ItemIndex);
     FPiSearcher.SearchSelfLocating := CheckBoxSelfLocating.Checked;
     FPiSearcher.Execute(GetFileNames);
   except
@@ -127,6 +130,12 @@ begin
   FRunning := False;
   FRunLog := TPFSMemoRunLog.Create(MemoLog, LabelProgress);
   FRunLog.Clear;
+
+  // In the order of TPFSReadMethod, the item index is the method
+  for var LReadMethod := Low(TPFSReadMethod) to High(TPFSReadMethod) do
+    ComboBoxReadMethod.Items.Add(READ_METHOD_NAMES[LReadMethod]);
+
+  ComboBoxReadMethod.ItemIndex := Ord(rmReadFile);
 end;
 
 procedure TPFSMainForm.FormDestroy(Sender: TObject);
