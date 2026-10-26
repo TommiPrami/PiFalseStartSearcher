@@ -227,6 +227,12 @@ begin
     // Seconds with decimals and the speed, to compare the reading methods
     ALines.Add(Format('Elapsed: %s (%s s), %s GB/s', [FormatElapsed(LProgress.ElapsedSeconds),
       FormatFloat('0.00', LProgress.ElapsedSeconds), FormatFloat('0.00', LBytesPerSecond / BYTES_IN_GB)]));
+    // Where the time went: reading runs in the background while the previous buffer is scanned
+    ALines.Add(Format('Scanning %s s, waiting for reads %s s', [FormatFloat('0.00', LProgress.ScanSeconds),
+      FormatFloat('0.00', LProgress.ReadWaitSeconds)]));
+    ALines.Add(Format('Reading in the background %s s, of which dropping non-digits %s s',
+      [FormatFloat('0.00', LProgress.ReadSeconds), FormatFloat('0.00', LProgress.CompactSeconds)]));
+    ALines.Add('(Waiting for reads near 0: the scan is the limit. Large: the reading is.)');
 
     AddStatisticsTable(APiSearcher, ALines);
 

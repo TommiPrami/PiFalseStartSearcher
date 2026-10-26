@@ -66,9 +66,17 @@ type
   TPFSProgress = record
     BytesRead: Int64;
     BytesTotal: Int64;
+    // Of ReadSeconds, the time spent dropping the non-digits
+    CompactSeconds: Double;
     DigitsScanned: Int64;
     ElapsedSeconds: Double;
     LongestMatch: Integer;
+    // Reading and compacting, mostly in the background while the previous buffer is scanned
+    ReadSeconds: Double;
+    // The scan waiting for the read of the next buffer, and the first read. Near 0: the scan is the limit.
+    ReadWaitSeconds: Double;
+    // Scanning the buffers and merging the results
+    ScanSeconds: Double;
   end;
 
   TPFSSearchEndedEvent = procedure(const APiSearcher: TPiFalseStartSearcher) of object;
@@ -94,6 +102,7 @@ type
   strict private
     FBytesRead: Int64;
     FBytesTotal: Int64;
+    FCompactTicks: Int64;
     FFileIndex: Integer;
     FFileNames: TArray<string>;
     FFileOffset: Int64;
@@ -105,8 +114,10 @@ type
     FReadMethod: TPFSReadMethod;
     FStream: TStream; // TFileStream or TSequentialReadOnlyFileStream
     FUnexpectedCharCount: Int64;
+    function CompactBytes(const ASource, ATarget: PByte; const AFrom, ATo, AWriteIndex: Integer): Integer;
     function CompactDigits(const ASource, ATarget: PByte; const ACount: Integer): Integer;
     function GetBytesRead: Int64;
+    function GetCompactTicks: Int64;
     function OpenNextFile: Boolean;
     function ReadFromIORingReader(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
     function ReadInPlace(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
@@ -123,6 +134,8 @@ type
     function ReadDigits(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Boolean;
     property BytesRead: Int64 read GetBytesRead;
     property BytesTotal: Int64 read FBytesTotal;
+    // TStopwatch ticks spent in CompactDigits
+    property CompactTicks: Int64 read GetCompactTicks;
     property FirstUnexpectedChar: string read FFirstUnexpectedChar;
     property NonDigitCount: Int64 read FNonDigitCount;
     property UnexpectedCharCount: Int64 read FUnexpectedCharCount;
@@ -143,6 +156,7 @@ type
     FMinMatchLength: Integer;
     FNextDigitCount: Integer;
     FNextHasData: Boolean;
+    FNextReadTicks: Int64;
     FOnlyNewLongestMatches: Boolean;
     FOnMatch: TPFSMatchEvent;
     FOnSearchEnded: TPFSSearchEndedEvent;
@@ -150,6 +164,10 @@ type
     FPatternLength: Integer;
     FReader: TPFSDigitFileReader;
     FReadMethod: TPFSReadMethod;
+    // TStopwatch ticks, see TPFSProgress
+    FReadTicks: Int64;
+    FReadWaitTicks: Int64;
+    FScanTicks: Int64;
     FSearchSelfLocating: Boolean;
     FStatistics: TPFSLengthStatistics;
     FStatus: TRunStatus;
@@ -167,6 +185,7 @@ type
     procedure AddFalseStart(const AData: PByte; const ADataLength, AIndex: Integer; const ADigitBase: Int64;
       var AResult: TPFSSliceResult);
     procedure AddNewLongestMatches(const AStatistics: TPFSLengthStatistics);
+    procedure AddTimes(const AReadTicks, AReadWaitTicks, AScanTicks: Int64);
     procedure FinishRun(const AStatus: TRunStatus; const AErrorMessage: string);
     procedure LoadPattern(const AFileName: string);
     procedure MergeSliceResults(const AResults: TArray<TPFSSliceResult>; const AScanCount: Integer);
@@ -243,6 +262,14 @@ const
   HIGH_NIBBLE_MASK: UInt64 = $F0F0F0F0F0F0F0F0;
   LOW_NIBBLE_MASK: UInt64 = $0F0F0F0F0F0F0F0F;
   LOW_NIBBLE_OVERFLOW: UInt64 = $0606060606060606;
+  // A run of digits at least this long found 8 at a time is a line of digits, shorter ones mean short groups
+  LONG_RUN_BYTES = 32;
+  // Shorter runs of digits CompactDigits copies word by word
+  MOVE_MIN_BYTES = 64;
+  // When the digits come in short groups, CompactDigits goes at first this many bytes one by one before it tries
+  // 8 at a time again, then twice as many each time in a row, up to MAX_SHORT_GROUP_BYTES
+  MAX_SHORT_GROUP_BYTES = 4096;
+  SHORT_GROUP_BYTES = 64;
   SLICE_SIZE = 1024 * 1024;
 
 type
@@ -268,6 +295,11 @@ begin
     AText[0] := Ord('1');
     Inc(ALength);
   end;
+end;
+
+function IsDigit(const AValue: Byte): Boolean; inline;
+begin
+  Result := (AValue >= Ord('0')) and (AValue <= Ord('9'));
 end;
 
 // True when all eight bytes are ASCII digits
@@ -334,6 +366,11 @@ end;
 function TPFSDigitFileReader.GetBytesRead: Int64;
 begin
   Result := TInterlocked.Read(FBytesRead);
+end;
+
+function TPFSDigitFileReader.GetCompactTicks: Int64;
+begin
+  Result := TInterlocked.Read(FCompactTicks);
 end;
 
 function TPFSDigitFileReader.OpenNextFile: Boolean;
@@ -453,37 +490,112 @@ end;
 // Copies the digits of ASource to ATarget, which may be ASource itself. Returns the number of digits.
 function TPFSDigitFileReader.CompactDigits(const ASource, ATarget: PByte; const ACount: Integer): Integer;
 var
-  LByte: Byte;
+  LIndex: Integer;
   LReadIndex: Integer;
+  LRunLength: Integer;
+  LRunStart: Integer;
+  LSlowBytes: Integer;
+  LSlowEnd: Integer;
+  LStart: Int64;
   LWriteIndex: Integer;
 begin
+  LStart := TStopwatch.GetTimeStamp;
   LReadIndex := 0;
-
-  // Fast path, the files are usually digits only
-  while (LReadIndex <= ACount - SizeOf(UInt64)) and IsAllDigits(PUInt64(ASource + LReadIndex)^) do
-    Inc(LReadIndex, SizeOf(UInt64));
-
-  if ASource <> ATarget then
-    Move(ASource^, ATarget^, LReadIndex);
-
-  LWriteIndex := LReadIndex;
+  LSlowBytes := SHORT_GROUP_BYTES;
+  LWriteIndex := 0;
 
   while LReadIndex < ACount do
   begin
-    LByte := ASource[LReadIndex];
+    LRunStart := LReadIndex;
+
+    // Fast path, 8 digits at a time: the files are mostly digits, a line usually has tens of them
+    while (LReadIndex <= ACount - SizeOf(UInt64)) and IsAllDigits(PUInt64(ASource + LReadIndex)^) do
+      Inc(LReadIndex, SizeOf(UInt64));
+
+    LRunLength := LReadIndex - LRunStart;
+
+    // In place the run is already there until the first non-digit. A short run word by word, a call to Move costs more.
+    // In place the target is behind the source, so a word is read before anything writes over it.
+    if ATarget + LWriteIndex <> ASource + LRunStart then
+    begin
+      if LRunLength >= MOVE_MIN_BYTES then
+        Move(ASource[LRunStart], ATarget[LWriteIndex], LRunLength)
+      else
+        for LIndex := 0 to LRunLength div SizeOf(UInt64) - 1 do
+          PUInt64(ATarget + LWriteIndex + LIndex * SizeOf(UInt64))^ :=
+            PUInt64(ASource + LRunStart + LIndex * SizeOf(UInt64))^;
+    end;
+
+    Inc(LWriteIndex, LRunLength);
+
+    if LRunLength >= LONG_RUN_BYTES then
+    begin
+      LSlowBytes := SHORT_GROUP_BYTES;
+
+      // After a long run of digits: the digits up to the non-digits that ended it (a line break, a space) ...
+      while (LReadIndex < ACount) and IsDigit(ASource[LReadIndex]) do
+      begin
+        ATarget[LWriteIndex] := ASource[LReadIndex];
+        Inc(LWriteIndex);
+        Inc(LReadIndex);
+      end;
+
+      // ... and the non-digits, then back to the fast path
+      while (LReadIndex < ACount) and not IsDigit(ASource[LReadIndex]) do
+      begin
+        NonDigitFound(ASource[LReadIndex], FFileOffset + LReadIndex);
+        Inc(LReadIndex);
+      end;
+    end
+    else
+    begin
+      { A short run or none, the digits come in short groups (12345 67890 ..., 1234567890 ...): a while byte by
+        byte, switching between the fast path and the bytes would only cost there. The while grows each time in a
+        row, so a file of short groups is soon read byte by byte nearly all the way. }
+      LSlowEnd := Min(LReadIndex + LSlowBytes, ACount);
+      LSlowBytes := Min(LSlowBytes * 2, MAX_SHORT_GROUP_BYTES);
+
+      LWriteIndex := CompactBytes(ASource, ATarget, LReadIndex, LSlowEnd, LWriteIndex);
+      LReadIndex := LSlowEnd;
+    end;
+  end;
+
+  TInterlocked.Add(FCompactTicks, TStopwatch.GetTimeStamp - LStart);
+
+  Result := LWriteIndex;
+end;
+
+{ CompactDigits byte by byte, from AFrom to ATo, writing from AWriteIndex on. Returns the next write index. A routine
+  of its own, with pointers in locals: measured (Win64, digits in groups of 5 and 10), the same loop with indexes ran
+  1.3-2x slower, inside CompactDigits and here alike. }
+function TPFSDigitFileReader.CompactBytes(const ASource, ATarget: PByte; const AFrom, ATo, AWriteIndex: Integer): Integer;
+var
+  LByte: Byte;
+  LEnd: PByte;
+  LSource: PByte;
+  LTarget: PByte;
+begin
+  // Pointers in locals: the 5th and 6th parameters come on the stack (Win64), locals can stay in registers
+  LSource := ASource + AFrom;
+  LEnd := ASource + ATo;
+  LTarget := ATarget + AWriteIndex;
+
+  while LSource < LEnd do
+  begin
+    LByte := LSource^;
 
     if (LByte >= Ord('0')) and (LByte <= Ord('9')) then
     begin
-      ATarget[LWriteIndex] := LByte;
-      Inc(LWriteIndex);
+      LTarget^ := LByte;
+      Inc(LTarget);
     end
     else
-      NonDigitFound(LByte, FFileOffset + LReadIndex);
+      NonDigitFound(LByte, FFileOffset + (LSource - ASource));
 
-    Inc(LReadIndex);
+    Inc(LSource);
   end;
 
-  Result := LWriteIndex;
+  Result := LTarget - ATarget;
 end;
 
 procedure TPFSDigitFileReader.FileBytesRead(const ACount: Integer);
@@ -638,6 +750,7 @@ begin
   begin
     Result.BytesRead := FReader.BytesRead;
     Result.BytesTotal := FReader.BytesTotal;
+    Result.CompactSeconds := FReader.CompactTicks / TStopwatch.Frequency;
   end;
 
   FLock.Acquire;
@@ -645,6 +758,9 @@ begin
     Result.DigitsScanned := FDigitsScanned;
     Result.ElapsedSeconds := FStopwatch.Elapsed.TotalSeconds;
     Result.LongestMatch := FLongestMatch;
+    Result.ReadSeconds := FReadTicks / TStopwatch.Frequency;
+    Result.ReadWaitSeconds := FReadWaitTicks / TStopwatch.Frequency;
+    Result.ScanSeconds := FScanTicks / TStopwatch.Frequency;
   finally
     FLock.Release;
   end;
@@ -687,8 +803,12 @@ function TPiFalseStartSearcher.StartReadTask(const ABuffer: PByte): ITask;
 begin
   Result := TTask.Run(
     procedure
+    var
+      LStart: Int64;
     begin
+      LStart := TStopwatch.GetTimeStamp;
       FNextHasData := FReader.ReadDigits(ABuffer, FBufferSize, FNextDigitCount);
+      FNextReadTicks := TStopwatch.GetTimeStamp - LStart;
     end
   );
 end;
@@ -773,6 +893,18 @@ begin
       if FOnlyNewLongestMatches then
         QueueMatch(LMatch);
     end;
+end;
+
+procedure TPiFalseStartSearcher.AddTimes(const AReadTicks, AReadWaitTicks, AScanTicks: Int64);
+begin
+  FLock.Acquire;
+  try
+    Inc(FReadTicks, AReadTicks);
+    Inc(FReadWaitTicks, AReadWaitTicks);
+    Inc(FScanTicks, AScanTicks);
+  finally
+    FLock.Release;
+  end;
 end;
 
 procedure TPiFalseStartSearcher.Cancel;
@@ -999,11 +1131,14 @@ var
   LData: PByte;
   LDigitBase: Int64;
   LDigitCount: Integer;
+  LEnd: Int64;
   LHasData: Boolean;
   LReadTask: ITask;
   LReserve: Integer;
   LScanCount: Integer;
+  LStart: Int64;
   LUsed: Integer;
+  LWaitStart: Int64;
 begin
   // Room in front of the read area for the digits carried over from the previous buffer
   LReserve := FPatternLength - 1;
@@ -1014,7 +1149,11 @@ begin
   LCurrent := 0;
   LCarryLength := 0;
   LDigitBase := 0;
+  LStart := TStopwatch.GetTimeStamp;
   LHasData := FReader.ReadDigits(@LBuffers[LCurrent][LReserve], FBufferSize, LDigitCount);
+  LEnd := TStopwatch.GetTimeStamp;
+  // Nothing to scan meanwhile, the first read is all waiting
+  AddTimes(LEnd - LStart, LEnd - LStart, 0);
 
   while LHasData and not HasRunEndedStatus do
   begin
@@ -1022,13 +1161,17 @@ begin
     LUsed := LCarryLength + LDigitCount;
 
     LReadTask := StartReadTask(@LBuffers[1 - LCurrent][LReserve]);
+    LStart := TStopwatch.GetTimeStamp;
     try
       // Only positions with a full prefix length of lookahead, the rest are carried to the next buffer
       LScanCount := Max(0, LUsed - FPatternLength + 1);
       ScanBuffer(LData, LUsed, LScanCount, LDigitBase);
     finally
+      LWaitStart := TStopwatch.GetTimeStamp;
       WaitForTask(LReadTask);
     end;
+
+    AddTimes(FNextReadTicks, TStopwatch.GetTimeStamp - LWaitStart, LWaitStart - LStart);
 
     LCarryLength := LUsed - LScanCount;
 
