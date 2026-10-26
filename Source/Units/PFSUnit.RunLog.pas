@@ -23,6 +23,7 @@ type
     procedure WriteLines(const ALines: TStrings); virtual;
   public
     procedure Clear; virtual;
+    procedure LogFileCachePurged(const AFileNames: TArray<string>);
     procedure LogMatch(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
     // AListedKinds = the match lists added to the summary, see AddSummary
     procedure LogRunEnded(const APiSearcher: TPiFalseStartSearcher; const AListedKinds: TPFSMatchKinds);
@@ -63,6 +64,12 @@ end;
 procedure TPFSRunLog.Clear;
 begin
   // Nothing to clear by default
+end;
+
+procedure TPFSRunLog.LogFileCachePurged(const AFileNames: TArray<string>);
+begin
+  for var LFileName in AFileNames do
+    WriteLine('Removed from the file cache: ' + LFileName);
 end;
 
 procedure TPFSRunLog.LogMatch(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);

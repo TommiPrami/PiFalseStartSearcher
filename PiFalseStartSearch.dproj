@@ -129,6 +129,7 @@
             <FormType>dfm</FormType>
         </DCCReference>
         <DCCReference Include="Source\Units\PFSUnit.FalseStartSearch.pas"/>
+        <DCCReference Include="Source\Units\PFSUnit.FileCache.pas"/>
         <DCCReference Include="Source\Units\PFSUnit.Report.pas"/>
         <DCCReference Include="Source\Units\PFSUnit.RunLog.pas"/>
         <DCCReference Include="Source\Units\PFSUnit.RunLog.Memo.pas"/>

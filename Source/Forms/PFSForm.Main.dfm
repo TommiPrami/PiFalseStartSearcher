@@ -44,6 +44,19 @@ object PFSMainForm: TPFSMainForm
       Align = alTop
       TabOrder = 1
     end
+    object ButtonFlushFileCache: TButton
+      AlignWithMargins = True
+      Left = 3
+      Top = 77
+      Width = 100
+      Height = 25
+      Margins.Top = 15
+      Action = ActionFlushFileCache
+      Align = alTop
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 2
+    end
   end
   object PanelLog: TPanel
     Left = 0
@@ -221,6 +234,15 @@ object PFSMainForm: TPFSMainForm
       Hint = 'Select the first digit file'
       OnExecute = ActionBrowseExecute
       OnUpdate = ActionBrowseUpdate
+    end
+    object ActionFlushFileCache: TAction
+      Caption = 'Flush file cache'
+      Hint =
+        'Removes the digit files (with the follow-up files, if they are se' +
+        'arched) from the Windows file cache, so the next run reads them f' +
+        'rom the disk. Does not work while another program has them open.'
+      OnExecute = ActionFlushFileCacheExecute
+      OnUpdate = ActionFlushFileCacheUpdate
     end
     object ActionRun: TAction
       Caption = 'Run'

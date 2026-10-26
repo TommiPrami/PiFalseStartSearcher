@@ -5,6 +5,7 @@
 uses
   Winapi.Windows, System.Classes, System.SysUtils,
   PFSUnit.FalseStartSearch in 'Source\Units\PFSUnit.FalseStartSearch.pas',
+  PFSUnit.FileCache in 'Source\Units\PFSUnit.FileCache.pas',
   PFSUnit.Report in 'Source\Units\PFSUnit.Report.pas',
   PFSUnit.RunLog in 'Source\Units\PFSUnit.RunLog.pas';
 
@@ -12,6 +13,7 @@ type
   TPFSConsoleRunner = class(TObject)
   strict private
     FEnded: Boolean;
+    FFlushFileCache: Boolean;
     FListedKinds: TPFSMatchKinds;
     FPiSearcher: TPiFalseStartSearcher;
     FRunLog: TPFSConsoleRunLog;
@@ -81,6 +83,8 @@ begin
 
   if SameText(LName, 'BufferMB') then
     FPiSearcher.BufferSize := LValue.ToInteger * 1024 * 1024
+  else if SameText(LName, 'FlushCache') then
+    FFlushFileCache := True
   else if SameText(LName, 'List') then
     FPiSearcher.ListMatchLength := LValue.ToInteger
   else if SameText(LName, 'LogAll') then
@@ -132,6 +136,12 @@ begin
   if LContinuationFiles and (Length(LFileNames) = 1) then
     LFileNames := TPiFalseStartSearcher.FindContinuationFiles(LFileNames[0]);
 
+  if FFlushFileCache then
+  begin
+    PurgeFileCache(LFileNames);
+    FRunLog.LogFileCachePurged(LFileNames);
+  end;
+
   FPiSearcher.Execute(LFileNames);
   GPiSearcher := FPiSearcher;
   SetConsoleCtrlHandler(@ConsoleCtrlHandler, True);
@@ -166,6 +176,7 @@ begin
   WriteLn('Usage: PiFalseStartSearchConsole <first digit file> [more files] [switches]');
   WriteLn;
   WriteLn('  -BufferMB:N      Read buffer size in MB (default 64)');
+  WriteLn('  -FlushCache      First remove the files from the Windows file cache, so they are read from the disk');
   WriteLn('  -List:N          Length for -SummaryFalseStarts and -LogAll (default 10)');
   WriteLn('  -LogAll          While running, log every false start of the -List length, not only a new longest one');
   WriteLn('  -Min:N           Count false starts from N digits up (default and minimum 4)');

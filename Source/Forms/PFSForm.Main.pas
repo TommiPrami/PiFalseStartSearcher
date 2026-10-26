@@ -10,10 +10,12 @@ uses
 type
   TPFSMainForm = class(TForm)
     ActionBrowse: TAction;
+    ActionFlushFileCache: TAction;
     ActionListMain: TActionList;
     ActionRun: TAction;
     ActionStopRun: TAction;
     ButtonBrowse: TButton;
+    ButtonFlushFileCache: TButton;
     ButtonRun: TButton;
     ButtonStopRun: TButton;
     CheckBoxContinuationFiles: TCheckBox;
@@ -35,6 +37,8 @@ type
     TimerProgress: TTimer;
     procedure ActionBrowseExecute(Sender: TObject);
     procedure ActionBrowseUpdate(Sender: TObject);
+    procedure ActionFlushFileCacheExecute(Sender: TObject);
+    procedure ActionFlushFileCacheUpdate(Sender: TObject);
     procedure ActionRunExecute(Sender: TObject);
     procedure ActionRunUpdate(Sender: TObject);
     procedure ActionStopRunExecute(Sender: TObject);
@@ -60,7 +64,7 @@ var
 implementation
 
 uses
-  PFSUnit.RunLog.Memo;
+  PFSUnit.FileCache, PFSUnit.RunLog.Memo;
 
 {$R *.dfm}
 
@@ -77,6 +81,19 @@ end;
 procedure TPFSMainForm.ActionBrowseUpdate(Sender: TObject);
 begin
   ActionBrowse.Enabled := not FRunning;
+end;
+
+procedure TPFSMainForm.ActionFlushFileCacheExecute(Sender: TObject);
+begin
+  var LFileNames := GetFileNames;
+
+  PurgeFileCache(LFileNames);
+  FRunLog.LogFileCachePurged(LFileNames);
+end;
+
+procedure TPFSMainForm.ActionFlushFileCacheUpdate(Sender: TObject);
+begin
+  ActionFlushFileCache.Enabled := not FRunning;
 end;
 
 procedure TPFSMainForm.ActionRunExecute(Sender: TObject);
