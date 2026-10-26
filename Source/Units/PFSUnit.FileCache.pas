@@ -14,30 +14,27 @@
 
 interface
 
-// Removes the files from the Windows file cache, so the next read of them comes from the disk
-procedure PurgeFileCache(const AFileNames: TArray<string>);
+// Removes the file from the Windows file cache, so the next read of it comes from the disk
+procedure PurgeFileCache(const AFileName: string);
 
 implementation
 
 uses
   Winapi.Windows, System.SysUtils;
 
-procedure PurgeFileCache(const AFileNames: TArray<string>);
+procedure PurgeFileCache(const AFileName: string);
 var
   LHandle: THandle;
 begin
-  for var LFileName in AFileNames do
-  begin
-    LHandle := CreateFile(PChar(LFileName), GENERIC_READ, FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE,
-      nil, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, 0);
+  LHandle := CreateFile(PChar(AFileName), GENERIC_READ, FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE, nil,
+    OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, 0);
 
-    if LHandle = INVALID_HANDLE_VALUE then
-      raise EOSError.CreateFmt('Cannot open "%s" to remove it from the file cache: %s',
-        [LFileName, SysErrorMessage(GetLastError)]);
+  if LHandle = INVALID_HANDLE_VALUE then
+    raise EOSError.CreateFmt('Cannot open "%s" to remove it from the file cache: %s',
+      [AFileName, SysErrorMessage(GetLastError)]);
 
-    // Opening it was enough, Windows dropped the cached data
-    CloseHandle(LHandle);
-  end;
+  // Opening it was enough, Windows dropped the cached data
+  CloseHandle(LHandle);
 end;
 
 end.

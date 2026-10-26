@@ -17,7 +17,7 @@ type
     FListedKinds: TPFSMatchKinds;
     FPiSearcher: TPiFalseStartSearcher;
     FRunLog: TPFSConsoleRunLog;
-    procedure ApplySwitch(const AParam: string; var AFileNames: TArray<string>; var AContinuationFiles: Boolean);
+    procedure ApplySwitch(const AParam: string; var AFileName: string);
     procedure FalseStartFound(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
     procedure SearchEnded(const APiSearcher: TPiFalseStartSearcher);
     procedure WriteUsage;
@@ -59,7 +59,7 @@ begin
   inherited Destroy;
 end;
 
-procedure TPFSConsoleRunner.ApplySwitch(const AParam: string; var AFileNames: TArray<string>; var AContinuationFiles: Boolean);
+procedure TPFSConsoleRunner.ApplySwitch(const AParam: string; var AFileName: string);
 var
   LName: string;
   LSeparator: Integer;
@@ -67,7 +67,10 @@ var
 begin
   if not (AParam.StartsWith('-') or AParam.StartsWith('/')) then
   begin
-    AFileNames := AFileNames + [AParam];
+    if not AFileName.IsEmpty then
+      raise EArgumentException.CreateFmt('Only one digit file, not also "%s"', [AParam]);
+
+    AFileName := AParam;
     Exit;
   end;
 
@@ -91,8 +94,6 @@ begin
     FPiSearcher.OnlyNewLongestMatches := False
   else if SameText(LName, 'Min') then
     FPiSearcher.MinMatchLength := LValue.ToInteger
-  else if SameText(LName, 'NoContinuation') then
-    AContinuationFiles := False
   else if SameText(LName, 'Out') then
     FRunLog.SummaryFileName := LValue
   else if SameText(LName, 'Read') then
@@ -114,35 +115,29 @@ end;
 
 function TPFSConsoleRunner.Run: Integer;
 var
-  LContinuationFiles: Boolean;
-  LFileNames: TArray<string>;
+  LFileName: string;
 begin
   FRunLog := TPFSConsoleRunLog.Create;
   FPiSearcher := TPiFalseStartSearcher.Create(FalseStartFound, SearchEnded);
 
-  LContinuationFiles := True;
-  LFileNames := [];
+  LFileName := '';
 
   for var LIndex := 1 to ParamCount do
-    ApplySwitch(ParamStr(LIndex), LFileNames, LContinuationFiles);
+    ApplySwitch(ParamStr(LIndex), LFileName);
 
-  if Length(LFileNames) = 0 then
+  if LFileName.IsEmpty then
   begin
     WriteUsage;
     Exit(1);
   end;
 
-  // With several files given, they are searched as given
-  if LContinuationFiles and (Length(LFileNames) = 1) then
-    LFileNames := TPiFalseStartSearcher.FindContinuationFiles(LFileNames[0]);
-
   if FFlushFileCache then
   begin
-    PurgeFileCache(LFileNames);
-    FRunLog.LogFileCachePurged(LFileNames);
+    PurgeFileCache(LFileName);
+    FRunLog.LogFileCachePurged(LFileName);
   end;
 
-  FPiSearcher.Execute(LFileNames);
+  FPiSearcher.Execute(LFileName);
   GPiSearcher := FPiSearcher;
   SetConsoleCtrlHandler(@ConsoleCtrlHandler, True);
 
@@ -173,19 +168,18 @@ end;
 
 procedure TPFSConsoleRunner.WriteUsage;
 begin
-  WriteLn('Usage: PiFalseStartSearchConsole <first digit file> [more files] [switches]');
+  WriteLn('Usage: PiFalseStartSearchConsole <digit file> [switches]');
   WriteLn;
-  WriteLn('  -BufferMB:N      Read buffer size in MB (default 64)');
-  WriteLn('  -FlushCache      First remove the files from the Windows file cache, so they are read from the disk');
+  WriteLn('  -BufferMB:N      Read buffer size in MB (default 64), not with the parallel methods');
+  WriteLn('  -FlushCache      First remove the file from the Windows file cache, so it is read from the disk');
   WriteLn('  -List:N          Length for -SummaryFalseStarts and -LogAll (default 10)');
   WriteLn('  -LogAll          While running, log every false start of the -List length, not only a new longest one');
   WriteLn('  -Min:N           Count false starts from N digits up (default and minimum 4)');
-  WriteLn('  -NoContinuation  Do not continue with the numbered follow-up files (_02, _03, ...)');
   WriteLn('  -Out:FileName    Also save the summary to a file');
-  WriteLn('  -Read:Method     How the files are read (default ReadFile):');
+  WriteLn('  -Read:Method     How the file is read (default ReadFile):');
 
   for var LReadMethod := Low(TPFSReadMethod) to High(TPFSReadMethod) do
-    WriteLn(Format('                     %-16s  %s', [READ_METHOD_SWITCHES[LReadMethod], READ_METHOD_NAMES[LReadMethod]]));
+    WriteLn(Format('                     %-22s  %s', [READ_METHOD_SWITCHES[LReadMethod], READ_METHOD_NAMES[LReadMethod]]));
 
   WriteLn('  -SelfLocating    Also search self-locating strings (digits at position P spell P)');
   WriteLn('  -SummaryFalseStarts  List the false starts of the -List length in the summary, the first 1 000');

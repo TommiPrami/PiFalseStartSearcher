@@ -18,7 +18,6 @@ type
     ButtonFlushFileCache: TButton;
     ButtonRun: TButton;
     ButtonStopRun: TButton;
-    CheckBoxContinuationFiles: TCheckBox;
     CheckBoxFlushAfterRun: TCheckBox;
     CheckBoxListFalseStarts: TCheckBox;
     CheckBoxOnlyNewLongest: TCheckBox;
@@ -52,10 +51,9 @@ type
     FRunLog: TPFSRunLog;
     // True from the start of a run until its end event has run, not only while the search thread runs
     FRunning: Boolean;
-    function GetFileNames: TArray<string>;
     function GetListedKinds: TPFSMatchKinds;
     procedure FalseStartFound(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
-    procedure FlushFileCache(const AFileNames: TArray<string>);
+    procedure FlushFileCache(const AFileName: string);
     procedure SearchEnded(const APiSearcher: TPiFalseStartSearcher);
     procedure SetRunning(const ARunning: Boolean);
   end;
@@ -87,7 +85,7 @@ end;
 
 procedure TPFSMainForm.ActionFlushFileCacheExecute(Sender: TObject);
 begin
-  FlushFileCache(GetFileNames);
+  FlushFileCache(EditFileName.Text);
 end;
 
 procedure TPFSMainForm.ActionFlushFileCacheUpdate(Sender: TObject);
@@ -109,7 +107,7 @@ begin
     FPiSearcher.OnlyNewLongestMatches := CheckBoxOnlyNewLongest.Checked;
     FPiSearcher.ReadMethod := TPFSReadMethod(ComboBoxReadMethod.ItemIndex);
     FPiSearcher.SearchSelfLocating := CheckBoxSelfLocating.Checked;
-    FPiSearcher.Execute(GetFileNames);
+    FPiSearcher.Execute(EditFileName.Text);
   except
     FreeAndNil(FPiSearcher);
     raise;
@@ -161,19 +159,12 @@ begin
   FreeAndNil(FRunLog);
 end;
 
-procedure TPFSMainForm.FlushFileCache(const AFileNames: TArray<string>);
+procedure TPFSMainForm.FlushFileCache(const AFileName: string);
 begin
-  PurgeFileCache(AFileNames);
-  FRunLog.LogFileCachePurged(AFileNames);
+  PurgeFileCache(AFileName);
+  FRunLog.LogFileCachePurged(AFileName);
 end;
 
-function TPFSMainForm.GetFileNames: TArray<string>;
-begin
-  if CheckBoxContinuationFiles.Checked then
-    Result := TPiFalseStartSearcher.FindContinuationFiles(EditFileName.Text)
-  else
-    Result := [EditFileName.Text];
-end;
 
 function TPFSMainForm.GetListedKinds: TPFSMatchKinds;
 begin
@@ -191,9 +182,9 @@ begin
   SetRunning(False);
   FRunLog.LogRunEnded(APiSearcher, GetListedKinds);
 
-  // The files of this run, the file name may have been edited meanwhile
+  // The file of this run, the file name may have been edited meanwhile
   if CheckBoxFlushAfterRun.Checked then
-    FlushFileCache(APiSearcher.FileNames);
+    FlushFileCache(APiSearcher.FileName);
 end;
 
 procedure TPFSMainForm.SetRunning(const ARunning: Boolean);

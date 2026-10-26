@@ -40,6 +40,10 @@ const
   MAX_PATTERN_LENGTH = 64;
   // Same as SizeOf(Cardinal), the first digits are compared as one Cardinal
   MIN_MATCH_LENGTH = 4;
+  // The parallel engine search: blocks of the file each worker reads, drops the non-digits of and scans
+  PARALLEL_BLOCK_SIZE = 8 * 1024 * 1024;
+  // The parallel engine search: workers, each with one block in work and the read of its next one in flight
+  PARALLEL_WORKER_COUNT = 12;
 
 type
   TPiFalseStartSearcher = class;
@@ -66,12 +70,13 @@ type
   TPFSProgress = record
     BytesRead: Int64;
     BytesTotal: Int64;
-    // Of ReadSeconds, the time spent dropping the non-digits
+    // Dropping the non-digits, on the search thread while the next buffer is read. Part of ReadSeconds instead with
+    // the zero-copy reader, which drops them as it reads.
     CompactSeconds: Double;
     DigitsScanned: Int64;
     ElapsedSeconds: Double;
     LongestMatch: Integer;
-    // Reading and compacting, mostly in the background while the previous buffer is scanned
+    // Reading, in the background while the previous buffer is handled
     ReadSeconds: Double;
     // The scan waiting for the read of the next buffer, and the first read. Near 0: the scan is the limit.
     ReadWaitSeconds: Double;
@@ -91,20 +96,45 @@ type
     rmReadFile,               // Windows ReadFile, with the sequential scan hint
     rmFileStream,             // Delphi's TFileStream, the usual way
     rmIORingStream,          // TSequentialReadOnlyFileStream, big reads go straight into the buffer
-    rmIORingReader,           // TIORingSequentialReader, digits copied straight from its buffers
-    rmIORingReaderUnbuffered  // the same, past the file cache
+    rmIORingStreamUnbuffered, // the same, past the file cache
+    rmIORingReader,          // TIORingSequentialReader, digits copied straight from its buffers
+    rmIORingReaderUnbuffered, // the same, past the file cache
+    rmIORingParallel,         // TIORingEngine: PARALLEL_WORKER_COUNT workers read, drop and scan blocks of the file
+    rmIORingParallelUnbuffered // the same, past the file cache
   );
 
   TRunStatus = (rsNone, rsRunning, rsCanceled, rsError, rsFinished);
 
-  // Reads the files one after another and hands out only the digits
+  // What dropping the non-digits of a piece of a file found. One per thread, merged in file order.
+  TPFSCompactState = record
+    // Of the first byte of the piece
+    FileOffset: Int64;
+    // In the piece
+    FirstUnexpectedIndex: Integer;
+    FirstUnexpectedValue: Byte;
+    NonDigitCount: Int64;
+    UnexpectedCount: Int64;
+    class function Create(const AFileOffset: Int64): TPFSCompactState; static;
+  end;
+
+  // One read of TPFSDigitFileReader.Read: where the bytes came from, and whether their non-digits are dropped yet
+  TPFSFileRead = record
+    ByteCount: Integer;
+    // Read and dropped in one go (the zero-copy reader). Then DigitCount is valid, otherwise Compact gives it.
+    Compacted: Boolean;
+    DigitCount: Integer;
+    FileOffset: Int64;
+  end;
+
+  { Reads the file and hands out only the digits. With the parallel engine search it only keeps the counts: the
+    workers read the file themselves. }
   TPFSDigitFileReader = class(TObject)
   strict private
     FBytesRead: Int64;
     FBytesTotal: Int64;
     FCompactTicks: Int64;
-    FFileIndex: Integer;
-    FFileNames: TArray<string>;
+    FFileDone: Boolean;
+    FFileName: string;
     FFileOffset: Int64;
     FFileOpen: Boolean;
     FFirstUnexpectedChar: string;
@@ -114,27 +144,35 @@ type
     FReadMethod: TPFSReadMethod;
     FStream: TStream; // TFileStream or TSequentialReadOnlyFileStream
     FUnexpectedCharCount: Int64;
-    function CompactBytes(const ASource, ATarget: PByte; const AFrom, ATo, AWriteIndex: Integer): Integer;
-    function CompactDigits(const ASource, ATarget: PByte; const ACount: Integer): Integer;
     function GetBytesRead: Int64;
     function GetCompactTicks: Int64;
-    function OpenNextFile: Boolean;
     function ReadFromIORingReader(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
-    function ReadInPlace(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
+    function ReadRaw(const ABuffer: PByte; const ACapacity: Integer): Integer;
     procedure FileBytesRead(const ACount: Integer);
-    procedure NonDigitFound(const AValue: Byte; const AFileOffset: Int64);
+    procedure OpenFile;
   public
-    constructor Create(const AFileNames: TArray<string>; const AReadMethod: TPFSReadMethod);
+    constructor Create(const AFileName: string; const AReadMethod: TPFSReadMethod);
     destructor Destroy; override;
 
+    // Thread-safe
+    procedure AddBytesRead(const ACount: Integer);
+    // Thread-safe
+    procedure AddCompactTicks(const ATicks: Int64);
+    // In file order, from one thread at a time
+    procedure AddCompactState(const AState: TPFSCompactState);
     // Also at the end of a canceled or failed run, so no handle keeps the file in the file cache
     procedure CloseCurrentFile;
 
-    // Fills ABuffer with the next digits, other characters are dropped. Returns False when all files are read.
-    function ReadDigits(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Boolean;
+    { Drops the non-digits of a read in place, in slices on several threads. Returns the number of digits, now at the
+      start of ABuffer. Can run on another thread than Read, while Read fills another buffer: so the disk keeps
+      reading meanwhile. Not on two threads at once. }
+    function Compact(const ABuffer: PByte; const ARead: TPFSFileRead): Integer;
+    { Fills ABuffer with the next bytes of the file. Their non-digits are dropped later with Compact, except with the
+      zero-copy reader, which copies only the digits out of its own buffers. Returns False when the file is read. }
+    function Read(const ABuffer: PByte; const ACapacity: Integer; var ARead: TPFSFileRead): Boolean;
     property BytesRead: Int64 read GetBytesRead;
     property BytesTotal: Int64 read FBytesTotal;
-    // TStopwatch ticks spent in CompactDigits
+    // TStopwatch ticks spent dropping the non-digits (wall time, also when several threads do it)
     property CompactTicks: Int64 read GetCompactTicks;
     property FirstUnexpectedChar: string read FFirstUnexpectedChar;
     property NonDigitCount: Int64 read FNonDigitCount;
@@ -146,7 +184,7 @@ type
     FBufferSize: Integer;
     FDigitsScanned: Int64;
     FErrorMessage: string;
-    FFileNames: TArray<string>;
+    FFileName: string;
     FIntegerDigits: Integer;
     FListedFalseStartCount: Integer;
     FListMatchLength: Integer;
@@ -154,8 +192,8 @@ type
     FLongestMatch: Integer;
     FMatches: TList<TPFSMatch>;
     FMinMatchLength: Integer;
-    FNextDigitCount: Integer;
     FNextHasData: Boolean;
+    FNextRead: TPFSFileRead;
     FNextReadTicks: Int64;
     FOnlyNewLongestMatches: Boolean;
     FOnMatch: TPFSMatchEvent;
@@ -194,6 +232,7 @@ type
     procedure ScanSlice(const AData: PByte; const ADataLength, AFrom, ATo: Integer; const ADigitBase: Int64;
       var AResult: TPFSSliceResult);
     procedure Search;
+    procedure SearchParallel;
     procedure SearchSelfLocatingStrings(const AData: PByte; const ADataLength, AFrom, ATo: Integer; const ADigitBase: Int64;
       var AResult: TPFSSliceResult);
     procedure SearchThreadProc;
@@ -202,18 +241,16 @@ type
     constructor Create(const AOnMatch: TPFSMatchEvent; const AOnSearchEnded: TPFSSearchEndedEvent);
     destructor Destroy; override;
 
-    // Returns AFileName and the files that continue it, pi_dec_1t_01.txt -> pi_dec_1t_02.txt etc., as long as they exist
-    class function FindContinuationFiles(const AFileName: string): TArray<string>;
     function GetMatches: TArray<TPFSMatch>;
     function GetStatistics: TPFSLengthStatistics;
     function HasRunEndedStatus: Boolean;
     procedure Cancel;
-    // Starts the search in a background thread. Raises on invalid settings or missing files. A searcher runs only once.
-    procedure Execute(const AFileNames: TArray<string>);
-    // Read-buffer size in bytes. Default = 64 MB. Does not affect which matches are found.
+    // Starts the search in a background thread. Raises on invalid settings or a missing file. A searcher runs only once.
+    procedure Execute(const AFileName: string);
+    // Read-buffer size in bytes, not with the parallel engine search. Default = 64 MB. Does not affect the matches found.
     property BufferSize: Integer read FBufferSize write FBufferSize;
     property ErrorMessage: string read GetErrorMessage;
-    property FileNames: TArray<string> read FFileNames;
+    property FileName: string read FFileName;
     property FirstUnexpectedChar: string read GetFirstUnexpectedChar;
     // Matches at least this long are listed in GetMatches, and reported one by one with OnMatch unless
     // OnlyNewLongestMatches is set. Only the first MAX_LISTED_FALSE_STARTS are listed, the statistics have the counts.
@@ -243,17 +280,20 @@ const
     'ReadFile (Windows API)',
     'TFileStream (Delphi RTL)',
     'IoRing stream (TSequentialReadOnlyFileStream)',
+    'IoRing stream, unbuffered',
     'IoRing zero-copy reader (TIORingSequentialReader)',
-    'IoRing zero-copy reader, unbuffered'
+    'IoRing zero-copy reader, unbuffered',
+    'IoRing engine, parallel (TIORingEngine)',
+    'IoRing engine, parallel, unbuffered'
   );
   // For the -Read: switch of the console version
-  READ_METHOD_SWITCHES: array[TPFSReadMethod] of string = ('ReadFile', 'FileStream', 'IORingStream', 'IORingReader',
-    'IORingUnbuffered');
+  READ_METHOD_SWITCHES: array[TPFSReadMethod] of string = ('ReadFile', 'FileStream', 'IORingStream',
+    'IORingStreamUnbuffered', 'IORingReader', 'IORingReaderUnbuffered', 'IORingParallel', 'IORingParallelUnbuffered');
 
 implementation
 
 uses
-  Winapi.Windows, System.Generics.Defaults, System.IOUtils, System.Math, PIRUnit.IORing;
+  Winapi.Windows, System.Generics.Defaults, System.IOUtils, System.Math, PIRUnit.Engine, PIRUnit.IORing;
 
 const
   DEFAULT_BUFFER_SIZE = 64 * 1024 * 1024;
@@ -271,9 +311,157 @@ const
   MAX_SHORT_GROUP_BYTES = 4096;
   SHORT_GROUP_BYTES = 64;
   SLICE_SIZE = 1024 * 1024;
+  // TPFSDigitFileReader.Compact drops the non-digits of slices this big on several threads
+  COMPACT_SLICE_SIZE = 4 * 1024 * 1024;
+  // The read area of the buffers starts at a page, so unbuffered reads can go straight into it
+  PAGE_SIZE = 4096;
 
 type
   TPFSPositionText = array[0..23] of Byte;
+
+  // One block of the parallel engine search, from its read to the merge
+  TPFSParallelBlock = record
+    // Digit index of its first digit, known once the blocks before it have dropped their non-digits
+    Base: Int64;
+    // Its first digits, up to the prefix length - 1: the lookahead of the digits before it
+    Head: TBytes;
+    Result: TPFSSliceResult;
+    // The worker scanned its positions 0..ScanCount - 1, those with the whole lookahead in the block
+    ScanCount: Integer;
+    State: TPFSCompactState;
+    // Its digits from ScanCount on, scanned at the seam with the next block
+    Tail: TBytes;
+    Done: Boolean;
+  end;
+
+  { What the workers of the parallel engine search share: the next block to take, the digit index the next block
+    starts at, and the finished blocks. The waits end at once when the search is aborted. }
+  TPFSParallelState = class(TObject)
+  strict private
+    FAborted: Boolean;
+    FBaseBlock: Integer;
+    FBlockCount: Integer;
+    FErrorMessage: string;
+    FNextBase: Int64;
+    FNextBlock: Integer;
+    function GetAborted: Boolean;
+    function GetErrorMessage: string;
+  public
+    Blocks: TArray<TPFSParallelBlock>;
+    constructor Create(const ABlockCount: Integer);
+
+    // Ends all waits. Keeps the first error message, '' for a cancel.
+    procedure Abort(const AErrorMessage: string);
+    // The next block to read. False: none left, or aborted.
+    function ClaimBlock(var AIndex: Integer): Boolean;
+    procedure SetDone(const AIndex: Integer);
+    { Waits until the blocks before AIndex have their digit counts, then gives AIndex the digit index it starts at.
+      Workers take their bases in block order, so this waits only for blocks other workers are finishing. False:
+      aborted. }
+    function TakeBase(const AIndex, ADigitCount: Integer; var ABase: Int64): Boolean;
+    // False: not done within ATimeoutMilliseconds, or aborted
+    function WaitDone(const AIndex: Integer; const ATimeoutMilliseconds: Cardinal): Boolean;
+    property Aborted: Boolean read GetAborted;
+    property ErrorMessage: string read GetErrorMessage;
+  end;
+
+{ TPFSParallelState }
+
+constructor TPFSParallelState.Create(const ABlockCount: Integer);
+begin
+  inherited Create;
+
+  FBlockCount := ABlockCount;
+  SetLength(Blocks, ABlockCount);
+end;
+
+procedure TPFSParallelState.Abort(const AErrorMessage: string);
+begin
+  TMonitor.Enter(Self);
+  try
+    if not FAborted then
+    begin
+      FAborted := True;
+      FErrorMessage := AErrorMessage;
+    end;
+
+    TMonitor.PulseAll(Self);
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+function TPFSParallelState.ClaimBlock(var AIndex: Integer): Boolean;
+begin
+  AIndex := TInterlocked.Increment(FNextBlock) - 1;
+
+  Result := (AIndex < FBlockCount) and not GetAborted;
+end;
+
+function TPFSParallelState.GetAborted: Boolean;
+begin
+  TMonitor.Enter(Self);
+  try
+    Result := FAborted;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+function TPFSParallelState.GetErrorMessage: string;
+begin
+  TMonitor.Enter(Self);
+  try
+    Result := FErrorMessage;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+procedure TPFSParallelState.SetDone(const AIndex: Integer);
+begin
+  TMonitor.Enter(Self);
+  try
+    Blocks[AIndex].Done := True;
+    TMonitor.PulseAll(Self);
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+function TPFSParallelState.TakeBase(const AIndex, ADigitCount: Integer; var ABase: Int64): Boolean;
+begin
+  TMonitor.Enter(Self);
+  try
+    while (FBaseBlock <> AIndex) and not FAborted do
+      TMonitor.Wait(Self, INFINITE);
+
+    Result := not FAborted;
+
+    if Result then
+    begin
+      ABase := FNextBase;
+      Inc(FNextBase, ADigitCount);
+      Inc(FBaseBlock);
+      TMonitor.PulseAll(Self);
+    end;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+function TPFSParallelState.WaitDone(const AIndex: Integer; const ATimeoutMilliseconds: Cardinal): Boolean;
+begin
+  TMonitor.Enter(Self);
+  try
+    if not Blocks[AIndex].Done and not FAborted then
+      TMonitor.Wait(Self, ATimeoutMilliseconds);
+
+    Result := Blocks[AIndex].Done and not FAborted;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
 
 procedure IncrementPositionText(var AText: TPFSPositionText; var ALength: Integer);
 var
@@ -334,161 +522,61 @@ begin
   end;
 end;
 
-{ TPFSDigitFileReader }
-
-constructor TPFSDigitFileReader.Create(const AFileNames: TArray<string>; const AReadMethod: TPFSReadMethod);
+// AIndex = in the piece AState is for
+procedure NonDigitFound(const AValue: Byte; const AIndex: Integer; var AState: TPFSCompactState);
 begin
-  inherited Create;
+  Inc(AState.NonDigitCount);
 
-  FFileNames := Copy(AFileNames);
-  FFileIndex := -1;
-  FFileOpen := False;
-  FHandle := INVALID_HANDLE_VALUE;
-  FReadMethod := AReadMethod;
-  FStream := nil;
-
-  for var LFileName in FFileNames do
-  begin
-    if not FileExists(LFileName) then
-      raise EFileNotFoundException.CreateFmt('File "%s" not found', [LFileName]);
-
-    Inc(FBytesTotal, TFile.GetSize(LFileName));
-  end;
-end;
-
-destructor TPFSDigitFileReader.Destroy;
-begin
-  CloseCurrentFile;
-
-  inherited Destroy;
-end;
-
-function TPFSDigitFileReader.GetBytesRead: Int64;
-begin
-  Result := TInterlocked.Read(FBytesRead);
-end;
-
-function TPFSDigitFileReader.GetCompactTicks: Int64;
-begin
-  Result := TInterlocked.Read(FCompactTicks);
-end;
-
-function TPFSDigitFileReader.OpenNextFile: Boolean;
-begin
-  Inc(FFileIndex);
-  Result := FFileIndex < Length(FFileNames);
-
-  if not Result then
+  // Decimal point and white space are expected, anything else hints at a broken file
+  if AValue in [Ord('.'), 9, 10, 13, 32] then
     Exit;
 
-  case FReadMethod of
-    rmReadFile:
-      begin
-        FHandle := CreateFile(PChar(FFileNames[FFileIndex]), GENERIC_READ, FILE_SHARE_READ, nil, OPEN_EXISTING,
-          FILE_FLAG_SEQUENTIAL_SCAN, 0);
-
-        if FHandle = INVALID_HANDLE_VALUE then
-          RaiseLastOSError;
-      end;
-    rmFileStream:
-      FStream := TFileStream.Create(FFileNames[FFileIndex], fmOpenRead or fmShareDenyWrite);
-    rmIORingStream:
-      FStream := TSequentialReadOnlyFileStream.Create(FFileNames[FFileIndex]);
-    rmIORingReader:
-      FIORingReader.Open(FFileNames[FFileIndex]);
-    rmIORingReaderUnbuffered:
-      FIORingReader.Open(FFileNames[FFileIndex], [sroUnbuffered]);
+  if AState.UnexpectedCount = 0 then
+  begin
+    AState.FirstUnexpectedIndex := AIndex;
+    AState.FirstUnexpectedValue := AValue;
   end;
 
-  FFileOpen := True;
-  FFileOffset := 0;
+  Inc(AState.UnexpectedCount);
 end;
 
-function TPFSDigitFileReader.ReadDigits(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Boolean;
+{ CompactDigits byte by byte, from AFrom to ATo, writing from AWriteIndex on. Returns the next write index. A routine
+  of its own, with pointers in locals: measured (Win64, digits in groups of 5 and 10), the same loop with indexes ran
+  1.3-2x slower, inside CompactDigits and here alike. }
+function CompactBytes(const ASource, ATarget: PByte; const AFrom, ATo, AWriteIndex: Integer;
+  var AState: TPFSCompactState): Integer;
 var
-  LBytesRead: Integer;
+  LByte: Byte;
+  LEnd: PByte;
+  LSource: PByte;
+  LTarget: PByte;
 begin
-  ADigitCount := 0;
+  // Pointers in locals: the 5th and later parameters come on the stack (Win64), locals can stay in registers
+  LSource := ASource + AFrom;
+  LEnd := ASource + ATo;
+  LTarget := ATarget + AWriteIndex;
 
-  while True do
+  while LSource < LEnd do
   begin
-    if not FFileOpen and not OpenNextFile then
-      Exit(False);
+    LByte := LSource^;
 
-    if FReadMethod in [rmIORingReader, rmIORingReaderUnbuffered] then
-      LBytesRead := ReadFromIORingReader(ABuffer, ACapacity, ADigitCount)
+    if (LByte >= Ord('0')) and (LByte <= Ord('9')) then
+    begin
+      LTarget^ := LByte;
+      Inc(LTarget);
+    end
     else
-      LBytesRead := ReadInPlace(ABuffer, ACapacity, ADigitCount);
+      NonDigitFound(LByte, LSource - ASource, AState);
 
-    if LBytesRead > 0 then
-      Break;
-
-    CloseCurrentFile;
+    Inc(LSource);
   end;
 
-  Result := True;
+  Result := LTarget - ATarget;
 end;
 
-// Returns the bytes read from the file, 0 at its end. A chunk is taken whole, so it is taken only while it fits in what
-// is left of ABuffer: the buffer may be filled up to the reader's buffer size short.
-function TPFSDigitFileReader.ReadFromIORingReader(const ABuffer: PByte; const ACapacity: Integer;
-  var ADigitCount: Integer): Integer;
-var
-  LChunk: PByte;
-  LChunkLength: NativeInt;
-begin
-  Result := 0;
-  ADigitCount := 0;
-
-  while (ACapacity - ADigitCount >= Integer(FIORingReader.BufferSize))
-    and FIORingReader.TryAcquireChunk(LChunk, LChunkLength)
-  do
-  begin
-    try
-      Inc(ADigitCount, CompactDigits(LChunk, ABuffer + ADigitCount, LChunkLength));
-    finally
-      FIORingReader.ReleaseChunk;
-    end;
-
-    FileBytesRead(LChunkLength);
-    Inc(Result, LChunkLength);
-  end;
-end;
-
-// Reads into ABuffer and drops the non-digits there. Returns the bytes read from the file, 0 at its end.
-function TPFSDigitFileReader.ReadInPlace(const ABuffer: PByte; const ACapacity: Integer; var ADigitCount: Integer): Integer;
-var
-  LBytesRead: DWORD;
-begin
-  if FReadMethod = rmReadFile then
-  begin
-    if not ReadFile(FHandle, ABuffer^, ACapacity, LBytesRead, nil) then
-      RaiseLastOSError;
-
-    Result := LBytesRead;
-  end
-  else
-    Result := FStream.Read(ABuffer^, ACapacity);
-
-  ADigitCount := CompactDigits(ABuffer, ABuffer, Result);
-  FileBytesRead(Result);
-end;
-
-procedure TPFSDigitFileReader.CloseCurrentFile;
-begin
-  if FHandle <> INVALID_HANDLE_VALUE then
-  begin
-    CloseHandle(FHandle);
-    FHandle := INVALID_HANDLE_VALUE;
-  end;
-
-  FreeAndNil(FStream);
-  FIORingReader.Close;
-  FFileOpen := False;
-end;
-
-// Copies the digits of ASource to ATarget, which may be ASource itself. Returns the number of digits.
-function TPFSDigitFileReader.CompactDigits(const ASource, ATarget: PByte; const ACount: Integer): Integer;
+{ Copies the digits of ASource to ATarget, which may be ASource itself. Returns the number of digits. What else it
+  finds goes to AState, so several threads can each do a piece of a buffer. }
+function CompactDigits(const ASource, ATarget: PByte; const ACount: Integer; var AState: TPFSCompactState): Integer;
 var
   LIndex: Integer;
   LReadIndex: Integer;
@@ -496,10 +584,8 @@ var
   LRunStart: Integer;
   LSlowBytes: Integer;
   LSlowEnd: Integer;
-  LStart: Int64;
   LWriteIndex: Integer;
 begin
-  LStart := TStopwatch.GetTimeStamp;
   LReadIndex := 0;
   LSlowBytes := SHORT_GROUP_BYTES;
   LWriteIndex := 0;
@@ -543,7 +629,7 @@ begin
       // ... and the non-digits, then back to the fast path
       while (LReadIndex < ACount) and not IsDigit(ASource[LReadIndex]) do
       begin
-        NonDigitFound(ASource[LReadIndex], FFileOffset + LReadIndex);
+        NonDigitFound(ASource[LReadIndex], LReadIndex, AState);
         Inc(LReadIndex);
       end;
     end
@@ -555,67 +641,249 @@ begin
       LSlowEnd := Min(LReadIndex + LSlowBytes, ACount);
       LSlowBytes := Min(LSlowBytes * 2, MAX_SHORT_GROUP_BYTES);
 
-      LWriteIndex := CompactBytes(ASource, ATarget, LReadIndex, LSlowEnd, LWriteIndex);
+      LWriteIndex := CompactBytes(ASource, ATarget, LReadIndex, LSlowEnd, LWriteIndex, AState);
       LReadIndex := LSlowEnd;
     end;
   end;
 
-  TInterlocked.Add(FCompactTicks, TStopwatch.GetTimeStamp - LStart);
-
   Result := LWriteIndex;
 end;
 
-{ CompactDigits byte by byte, from AFrom to ATo, writing from AWriteIndex on. Returns the next write index. A routine
-  of its own, with pointers in locals: measured (Win64, digits in groups of 5 and 10), the same loop with indexes ran
-  1.3-2x slower, inside CompactDigits and here alike. }
-function TPFSDigitFileReader.CompactBytes(const ASource, ATarget: PByte; const AFrom, ATo, AWriteIndex: Integer): Integer;
-var
-  LByte: Byte;
-  LEnd: PByte;
-  LSource: PByte;
-  LTarget: PByte;
+{ TPFSCompactState }
+
+class function TPFSCompactState.Create(const AFileOffset: Int64): TPFSCompactState;
 begin
-  // Pointers in locals: the 5th and 6th parameters come on the stack (Win64), locals can stay in registers
-  LSource := ASource + AFrom;
-  LEnd := ASource + ATo;
-  LTarget := ATarget + AWriteIndex;
+  Result := Default(TPFSCompactState);
+  Result.FileOffset := AFileOffset;
+end;
 
-  while LSource < LEnd do
-  begin
-    LByte := LSource^;
+{ TPFSDigitFileReader }
 
-    if (LByte >= Ord('0')) and (LByte <= Ord('9')) then
-    begin
-      LTarget^ := LByte;
-      Inc(LTarget);
-    end
-    else
-      NonDigitFound(LByte, FFileOffset + (LSource - ASource));
+constructor TPFSDigitFileReader.Create(const AFileName: string; const AReadMethod: TPFSReadMethod);
+begin
+  inherited Create;
 
-    Inc(LSource);
+  FFileName := AFileName;
+  FFileDone := False;
+  FFileOpen := False;
+  FHandle := INVALID_HANDLE_VALUE;
+  FReadMethod := AReadMethod;
+  FStream := nil;
+
+  if not FileExists(FFileName) then
+    raise EFileNotFoundException.CreateFmt('File "%s" not found', [FFileName]);
+
+  FBytesTotal := TFile.GetSize(FFileName);
+end;
+
+destructor TPFSDigitFileReader.Destroy;
+begin
+  CloseCurrentFile;
+
+  inherited Destroy;
+end;
+
+function TPFSDigitFileReader.GetBytesRead: Int64;
+begin
+  Result := TInterlocked.Read(FBytesRead);
+end;
+
+function TPFSDigitFileReader.GetCompactTicks: Int64;
+begin
+  Result := TInterlocked.Read(FCompactTicks);
+end;
+
+procedure TPFSDigitFileReader.OpenFile;
+begin
+  case FReadMethod of
+    rmReadFile:
+      begin
+        FHandle := CreateFile(PChar(FFileName), GENERIC_READ, FILE_SHARE_READ, nil, OPEN_EXISTING,
+          FILE_FLAG_SEQUENTIAL_SCAN, 0);
+
+        if FHandle = INVALID_HANDLE_VALUE then
+          RaiseLastOSError;
+      end;
+    rmFileStream:
+      FStream := TFileStream.Create(FFileName, fmOpenRead or fmShareDenyWrite);
+    rmIORingStream:
+      FStream := TSequentialReadOnlyFileStream.Create(FFileName);
+    rmIORingStreamUnbuffered:
+      FStream := TSequentialReadOnlyFileStream.Create(FFileName, [sroUnbuffered]);
+    rmIORingReader:
+      FIORingReader.Open(FFileName);
+    rmIORingReaderUnbuffered:
+      FIORingReader.Open(FFileName, [sroUnbuffered]);
   end;
 
-  Result := LTarget - ATarget;
+  FFileOpen := True;
+  FFileOffset := 0;
+end;
+
+function TPFSDigitFileReader.Read(const ABuffer: PByte; const ACapacity: Integer; var ARead: TPFSFileRead): Boolean;
+begin
+  ARead := Default(TPFSFileRead);
+
+  if FFileDone then
+    Exit(False);
+
+  if not FFileOpen then
+    OpenFile;
+
+  ARead.FileOffset := FFileOffset;
+  ARead.Compacted := FReadMethod in [rmIORingReader, rmIORingReaderUnbuffered];
+
+  if ARead.Compacted then
+    ARead.ByteCount := ReadFromIORingReader(ABuffer, ACapacity, ARead.DigitCount)
+  else
+    ARead.ByteCount := ReadRaw(ABuffer, ACapacity);
+
+  Result := ARead.ByteCount > 0;
+
+  if not Result then
+  begin
+    CloseCurrentFile;
+    FFileDone := True;
+  end;
+end;
+
+// Returns the bytes read from the file, 0 at its end. A chunk is taken whole, so it is taken only while it fits in what
+// is left of ABuffer: the buffer may be filled up to the reader's buffer size short.
+function TPFSDigitFileReader.ReadFromIORingReader(const ABuffer: PByte; const ACapacity: Integer;
+  var ADigitCount: Integer): Integer;
+var
+  LChunk: PByte;
+  LChunkLength: NativeInt;
+  LStart: Int64;
+  LState: TPFSCompactState;
+begin
+  Result := 0;
+  ADigitCount := 0;
+
+  while (ACapacity - ADigitCount >= Integer(FIORingReader.BufferSize))
+    and FIORingReader.TryAcquireChunk(LChunk, LChunkLength)
+  do
+  begin
+    LStart := TStopwatch.GetTimeStamp;
+    try
+      LState := TPFSCompactState.Create(FFileOffset);
+      Inc(ADigitCount, CompactDigits(LChunk, ABuffer + ADigitCount, LChunkLength, LState));
+    finally
+      FIORingReader.ReleaseChunk;
+    end;
+
+    TInterlocked.Add(FCompactTicks, TStopwatch.GetTimeStamp - LStart);
+    AddCompactState(LState);
+    FileBytesRead(LChunkLength);
+    Inc(Result, LChunkLength);
+  end;
+end;
+
+// Reads into ABuffer as is, Compact drops the non-digits later. Returns the bytes read from the file, 0 at its end.
+function TPFSDigitFileReader.ReadRaw(const ABuffer: PByte; const ACapacity: Integer): Integer;
+var
+  LBytesRead: DWORD;
+begin
+  if FReadMethod = rmReadFile then
+  begin
+    if not ReadFile(FHandle, ABuffer^, ACapacity, LBytesRead, nil) then
+      RaiseLastOSError;
+
+    Result := LBytesRead;
+  end
+  else
+    Result := FStream.Read(ABuffer^, ACapacity);
+
+  FileBytesRead(Result);
+end;
+
+procedure TPFSDigitFileReader.AddBytesRead(const ACount: Integer);
+begin
+  TInterlocked.Add(FBytesRead, Int64(ACount));
+end;
+
+procedure TPFSDigitFileReader.AddCompactTicks(const ATicks: Int64);
+begin
+  TInterlocked.Add(FCompactTicks, ATicks);
+end;
+
+procedure TPFSDigitFileReader.AddCompactState(const AState: TPFSCompactState);
+begin
+  Inc(FNonDigitCount, AState.NonDigitCount);
+
+  if AState.UnexpectedCount = 0 then
+    Exit;
+
+  if FUnexpectedCharCount = 0 then
+    FFirstUnexpectedChar := Format('$%.2x at byte offset %d of "%s"',
+      [AState.FirstUnexpectedValue, AState.FileOffset + AState.FirstUnexpectedIndex, FFileName]);
+
+  Inc(FUnexpectedCharCount, AState.UnexpectedCount);
+end;
+
+{ Each slice moves its digits to its own start, then the gaps between the slices are closed in order; a file of digits
+  only has none. One thread could not keep up with the IoRing reads. }
+function TPFSDigitFileReader.Compact(const ABuffer: PByte; const ARead: TPFSFileRead): Integer;
+var
+  LCounts: TArray<Integer>;
+  LSliceCount: Integer;
+  LSliceStart: Integer;
+  LStart: Int64;
+  LStates: TArray<TPFSCompactState>;
+begin
+  if ARead.Compacted then
+    Exit(ARead.DigitCount);
+
+  LStart := TStopwatch.GetTimeStamp;
+  LSliceCount := (ARead.ByteCount + COMPACT_SLICE_SIZE - 1) div COMPACT_SLICE_SIZE;
+  SetLength(LCounts, LSliceCount);
+  SetLength(LStates, LSliceCount);
+
+  TParallel.for(0, LSliceCount - 1,
+    procedure(AIndex: Integer)
+    var
+      LFrom: Integer;
+    begin
+      LFrom := AIndex * COMPACT_SLICE_SIZE;
+      LStates[AIndex] := TPFSCompactState.Create(ARead.FileOffset + LFrom);
+      LCounts[AIndex] := CompactDigits(ABuffer + LFrom, ABuffer + LFrom, Min(COMPACT_SLICE_SIZE, ARead.ByteCount - LFrom),
+        LStates[AIndex]);
+    end
+  );
+
+  Result := 0;
+
+  for var LIndex := 0 to LSliceCount - 1 do
+  begin
+    LSliceStart := LIndex * COMPACT_SLICE_SIZE;
+
+    if Result <> LSliceStart then
+      Move(ABuffer[LSliceStart], ABuffer[Result], LCounts[LIndex]);
+
+    Inc(Result, LCounts[LIndex]);
+    AddCompactState(LStates[LIndex]);
+  end;
+
+  TInterlocked.Add(FCompactTicks, TStopwatch.GetTimeStamp - LStart);
+end;
+
+procedure TPFSDigitFileReader.CloseCurrentFile;
+begin
+  if FHandle <> INVALID_HANDLE_VALUE then
+  begin
+    CloseHandle(FHandle);
+    FHandle := INVALID_HANDLE_VALUE;
+  end;
+
+  FreeAndNil(FStream);
+  FIORingReader.Close;
+  FFileOpen := False;
 end;
 
 procedure TPFSDigitFileReader.FileBytesRead(const ACount: Integer);
 begin
   Inc(FFileOffset, ACount);
   TInterlocked.Add(FBytesRead, Int64(ACount));
-end;
-
-procedure TPFSDigitFileReader.NonDigitFound(const AValue: Byte; const AFileOffset: Int64);
-begin
-  Inc(FNonDigitCount);
-
-  // Decimal point and white space are expected, anything else hints at a broken file
-  if AValue in [Ord('.'), 9, 10, 13, 32] then
-    Exit;
-
-  if FUnexpectedCharCount = 0 then
-    FFirstUnexpectedChar := Format('$%.2x at byte offset %d of "%s"', [AValue, AFileOffset, FFileNames[FFileIndex]]);
-
-  Inc(FUnexpectedCharCount);
 end;
 
 { TPiFalseStartSearcher }
@@ -662,43 +930,6 @@ end;
 function TPiFalseStartSearcher.DigitIndexToPosition(const ADigitIndex: Int64): Int64;
 begin
   Result := ADigitIndex - FIntegerDigits + 1;
-end;
-
-class function TPiFalseStartSearcher.FindContinuationFiles(const AFileName: string): TArray<string>;
-var
-  LBaseName: string;
-  LDigitCount: Integer;
-  LDigitStart: Integer;
-  LFileName: string;
-  LNumber: Integer;
-begin
-  Result := [AFileName];
-
-  LBaseName := TPath.GetFileNameWithoutExtension(AFileName);
-  LDigitStart := Length(LBaseName);
-
-  while (LDigitStart >= 1) and CharInSet(LBaseName[LDigitStart], ['0'..'9']) do
-    Dec(LDigitStart);
-
-  LDigitCount := Length(LBaseName) - LDigitStart;
-
-  if (LDigitCount = 0) or (LDigitCount > 9) then
-    Exit;
-
-  LNumber := StrToInt(Copy(LBaseName, LDigitStart + 1, LDigitCount));
-  LBaseName := Copy(LBaseName, 1, LDigitStart);
-
-  while True do
-  begin
-    Inc(LNumber);
-    LFileName := TPath.Combine(TPath.GetDirectoryName(AFileName),
-      LBaseName + IntToStr(LNumber).PadLeft(LDigitCount, '0') + TPath.GetExtension(AFileName));
-
-    if not FileExists(LFileName) then
-      Break;
-
-    Result := Result + [LFileName];
-  end;
 end;
 
 function TPiFalseStartSearcher.GetErrorMessage: string;
@@ -807,7 +1038,7 @@ begin
       LStart: Int64;
     begin
       LStart := TStopwatch.GetTimeStamp;
-      FNextHasData := FReader.ReadDigits(ABuffer, FBufferSize, FNextDigitCount);
+      FNextHasData := FReader.Read(ABuffer, FBufferSize, FNextRead);
       FNextReadTicks := TStopwatch.GetTimeStamp - LStart;
     end
   );
@@ -918,19 +1149,19 @@ begin
   end;
 end;
 
-procedure TPiFalseStartSearcher.Execute(const AFileNames: TArray<string>);
+procedure TPiFalseStartSearcher.Execute(const AFileName: string);
 begin
   if GetStatus <> rsNone then
     raise EInvalidOpException.Create('A searcher runs only once, create a new one for the next run');
 
-  if Length(AFileNames) = 0 then
-    raise EArgumentException.Create('No files to search');
+  if AFileName.IsEmpty then
+    raise EArgumentException.Create('No file to search');
 
   ValidateSettings;
 
-  FFileNames := Copy(AFileNames);
-  FReader := TPFSDigitFileReader.Create(FFileNames, FReadMethod);
-  LoadPattern(FFileNames[0]);
+  FFileName := AFileName;
+  FReader := TPFSDigitFileReader.Create(FFileName, FReadMethod);
+  LoadPattern(FFileName);
 
   FThread := TThread.CreateAnonymousThread(
     procedure
@@ -1133,6 +1364,8 @@ var
   LDigitCount: Integer;
   LEnd: Int64;
   LHasData: Boolean;
+  LRead: TPFSFileRead;
+  LReadStarts: array[0..1] of Integer;
   LReadTask: ITask;
   LReserve: Integer;
   LScanCount: Integer;
@@ -1143,26 +1376,33 @@ begin
   // Room in front of the read area for the digits carried over from the previous buffer
   LReserve := FPatternLength - 1;
 
+  // The read area starts at a page, so unbuffered reads can go straight into it
   for LCurrent := Low(LBuffers) to High(LBuffers) do
-    SetLength(LBuffers[LCurrent], LReserve + FBufferSize);
+  begin
+    SetLength(LBuffers[LCurrent], LReserve + PAGE_SIZE + FBufferSize);
+    LReadStarts[LCurrent] := LReserve + Integer((PAGE_SIZE - NativeUInt(@LBuffers[LCurrent][LReserve]) mod PAGE_SIZE)
+      mod PAGE_SIZE);
+  end;
 
   LCurrent := 0;
   LCarryLength := 0;
   LDigitBase := 0;
   LStart := TStopwatch.GetTimeStamp;
-  LHasData := FReader.ReadDigits(@LBuffers[LCurrent][LReserve], FBufferSize, LDigitCount);
+  LHasData := FReader.Read(@LBuffers[LCurrent][LReadStarts[LCurrent]], FBufferSize, LRead);
   LEnd := TStopwatch.GetTimeStamp;
   // Nothing to scan meanwhile, the first read is all waiting
   AddTimes(LEnd - LStart, LEnd - LStart, 0);
 
   while LHasData and not HasRunEndedStatus do
   begin
-    LData := @LBuffers[LCurrent][LReserve - LCarryLength];
-    LUsed := LCarryLength + LDigitCount;
-
-    LReadTask := StartReadTask(@LBuffers[1 - LCurrent][LReserve]);
-    LStart := TStopwatch.GetTimeStamp;
+    // The next read goes on while this buffer's non-digits are dropped and it is scanned
+    LReadTask := StartReadTask(@LBuffers[1 - LCurrent][LReadStarts[1 - LCurrent]]);
     try
+      LDigitCount := FReader.Compact(@LBuffers[LCurrent][LReadStarts[LCurrent]], LRead);
+      LData := @LBuffers[LCurrent][LReadStarts[LCurrent] - LCarryLength];
+      LUsed := LCarryLength + LDigitCount;
+
+      LStart := TStopwatch.GetTimeStamp;
       // Only positions with a full prefix length of lookahead, the rest are carried to the next buffer
       LScanCount := Max(0, LUsed - FPatternLength + 1);
       ScanBuffer(LData, LUsed, LScanCount, LDigitBase);
@@ -1176,17 +1416,212 @@ begin
     LCarryLength := LUsed - LScanCount;
 
     if LCarryLength > 0 then
-      Move(LData[LScanCount], LBuffers[1 - LCurrent][LReserve - LCarryLength], LCarryLength);
+      Move(LData[LScanCount], LBuffers[1 - LCurrent][LReadStarts[1 - LCurrent] - LCarryLength], LCarryLength);
 
     Inc(LDigitBase, LScanCount);
     LCurrent := 1 - LCurrent;
     LHasData := FNextHasData;
-    LDigitCount := FNextDigitCount;
+    LRead := FNextRead;
   end;
 
-  // The last digits of the last file
+  // The last digits of the file
   if not HasRunEndedStatus then
-    ScanBuffer(@LBuffers[LCurrent][LReserve - LCarryLength], LCarryLength, LCarryLength, LDigitBase);
+    ScanBuffer(@LBuffers[LCurrent][LReadStarts[LCurrent] - LCarryLength], LCarryLength, LCarryLength, LDigitBase);
+end;
+
+{ The parallel engine search. PARALLEL_WORKER_COUNT workers each take the next block of the file, read it through the
+  engine (the read of their next block is already in flight meanwhile), drop its non-digits and scan the positions that
+  have their whole lookahead in the block. A block's digit index is known once the blocks before it have dropped their
+  non-digits, so the workers take it in block order (TPFSParallelState.TakeBase). This thread merges the results in
+  file order and scans the seams: the last digits of a block with the first digits of the next. Every byte of the file
+  is read once, no reads overlap. }
+procedure TPiFalseStartSearcher.SearchParallel;
+var
+  LBlock: TPFSParallelBlock;
+  LBlockCount: Integer;
+  LCarry: TBytes;
+  LCarryBase: Int64;
+  LEngine: TIORingEngine;
+  LFile: THandle;
+  LKeptLength: Integer;
+  LSeam: TBytes;
+  LSeamScan: Integer;
+  LState: TPFSParallelState;
+  LTasks: TArray<ITask>;
+  LWorker: TProc;
+begin
+  LBlockCount := Integer((FReader.BytesTotal + PARALLEL_BLOCK_SIZE - 1) div PARALLEL_BLOCK_SIZE);
+  LFile := TIORingPlatform.OpenFileForRead(FFileName, FReadMethod = rmIORingParallelUnbuffered, False);
+  try
+    // Each worker keeps two reads at most: its block's and the next one's
+    LEngine := TIORingEngine.Create(4 * PARALLEL_WORKER_COUNT);
+    try
+      LState := TPFSParallelState.Create(LBlockCount);
+      try
+        LWorker :=
+          procedure
+          var
+            LBase: Int64;
+            LBuffers: array[0..1] of PByte;
+            LCompletion: TIORingCompletion;
+            LDigitCount: Integer;
+            LHandles: array[0..1] of TIORingRequestHandle;
+            LHasNext: Boolean;
+            LIndex: Integer;
+            LInFlight: array[0..1] of Boolean;
+            LNextIndex: Integer;
+            LSide: Integer;
+            LStart: Int64;
+            LTarget: ^TPFSParallelBlock;
+            LWaitTicks: Int64;
+          begin
+            LBuffers[0] := TIORingPlatform.AllocPages(PARALLEL_BLOCK_SIZE);
+            LBuffers[1] := TIORingPlatform.AllocPages(PARALLEL_BLOCK_SIZE);
+            LInFlight[0] := False;
+            LInFlight[1] := False;
+            try
+              try
+                LSide := 0;
+                LHasNext := LState.ClaimBlock(LIndex);
+
+                if LHasNext then
+                begin
+                  LHandles[LSide] := LEngine.ReadAsync(LFile, LBuffers[LSide]^, PARALLEL_BLOCK_SIZE,
+                    UInt64(LIndex) * PARALLEL_BLOCK_SIZE);
+                  LInFlight[LSide] := True;
+                end;
+
+                while LHasNext do
+                begin
+                  // The next block's read goes on while this one is handled
+                  LHasNext := LState.ClaimBlock(LNextIndex);
+
+                  if LHasNext then
+                  begin
+                    LHandles[1 - LSide] := LEngine.ReadAsync(LFile, LBuffers[1 - LSide]^, PARALLEL_BLOCK_SIZE,
+                      UInt64(LNextIndex) * PARALLEL_BLOCK_SIZE);
+                    LInFlight[1 - LSide] := True;
+                  end;
+
+                  LStart := TStopwatch.GetTimeStamp;
+                  LInFlight[LSide] := False;
+                  LEngine.Wait(LHandles[LSide], LCompletion);
+                  LCompletion.RaiseIfFailed('Read');
+                  LWaitTicks := TStopwatch.GetTimeStamp - LStart;
+                  FReader.AddBytesRead(Integer(LCompletion.BytesTransferred));
+
+                  // The array is not resized while the workers run, so the pointer stays valid
+                  LTarget := @LState.Blocks[LIndex];
+
+                  LStart := TStopwatch.GetTimeStamp;
+                  LTarget^.State := TPFSCompactState.Create(Int64(LIndex) * PARALLEL_BLOCK_SIZE);
+                  LDigitCount := CompactDigits(LBuffers[LSide], LBuffers[LSide], Integer(LCompletion.BytesTransferred),
+                    LTarget^.State);
+                  FReader.AddCompactTicks(TStopwatch.GetTimeStamp - LStart);
+
+                  if not LState.TakeBase(LIndex, LDigitCount, LBase) then
+                    Break;
+
+                  LStart := TStopwatch.GetTimeStamp;
+                  LTarget^.Base := LBase;
+                  LTarget^.ScanCount := Max(0, LDigitCount - FPatternLength + 1);
+                  ScanSlice(LBuffers[LSide], LDigitCount, 0, LTarget^.ScanCount, LBase, LTarget^.Result);
+
+                  SetLength(LTarget^.Head, Min(LDigitCount, FPatternLength - 1));
+                  SetLength(LTarget^.Tail, LDigitCount - LTarget^.ScanCount);
+
+                  if Length(LTarget^.Head) > 0 then
+                    Move(LBuffers[LSide]^, LTarget^.Head[0], Length(LTarget^.Head));
+
+                  if Length(LTarget^.Tail) > 0 then
+                    Move(LBuffers[LSide][LTarget^.ScanCount], LTarget^.Tail[0], Length(LTarget^.Tail));
+
+                  AddTimes(0, LWaitTicks, TStopwatch.GetTimeStamp - LStart);
+                  LState.SetDone(LIndex);
+
+                  LIndex := LNextIndex;
+                  LSide := 1 - LSide;
+                end;
+              except
+                on E: Exception do
+                  LState.Abort(E.Message);
+              end;
+            finally
+              // The buffers may go only after their reads
+              for LSide := 0 to 1 do
+                if LInFlight[LSide] then
+                  LEngine.Wait(LHandles[LSide], LCompletion);
+
+              TIORingPlatform.FreePages(LBuffers[0], PARALLEL_BLOCK_SIZE);
+              TIORingPlatform.FreePages(LBuffers[1], PARALLEL_BLOCK_SIZE);
+            end;
+          end;
+
+        SetLength(LTasks, PARALLEL_WORKER_COUNT);
+
+        for var LIndex := 0 to High(LTasks) do
+          LTasks[LIndex] := TTask.Run(LWorker);
+
+        try
+          LCarry := nil;
+          LCarryBase := 0;
+
+          // The blocks in file order: first the seam of the digits before the block, then the block's own positions
+          for var LIndex := 0 to LBlockCount - 1 do
+          begin
+            while not LState.WaitDone(LIndex, 100) do
+            begin
+              if HasRunEndedStatus then
+                LState.Abort('');
+
+              if LState.Aborted then
+                Break;
+            end;
+
+            if LState.Aborted then
+              Break;
+
+            LBlock := LState.Blocks[LIndex];
+            LState.Blocks[LIndex] := Default(TPFSParallelBlock);
+
+            LSeam := LCarry + LBlock.Head;
+            // The carried digits that now have their whole lookahead, all of them unless the block is tiny
+            LSeamScan := Min(Length(LCarry), Max(0, Length(LSeam) - FPatternLength + 1));
+
+            if LSeamScan > 0 then
+              ScanBuffer(@LSeam[0], Length(LSeam), LSeamScan, LCarryBase);
+
+            MergeSliceResults([LBlock.Result], LBlock.ScanCount);
+            FReader.AddCompactState(LBlock.State);
+
+            LKeptLength := Length(LCarry) - LSeamScan;
+            LCarry := Copy(LCarry, LSeamScan, LKeptLength) + LBlock.Tail;
+            LCarryBase := LBlock.Base + LBlock.ScanCount - LKeptLength;
+          end;
+
+          // The last digits of the file. Not aborted here also means all blocks are merged.
+          if not LState.Aborted and not HasRunEndedStatus and (Length(LCarry) > 0) then
+            ScanBuffer(@LCarry[0], Length(LCarry), Length(LCarry), LCarryBase);
+        finally
+          // Ends the workers' waits when the merge stopped early. After a normal end nothing waits anymore. Keeps a
+          // worker's error message.
+          LState.Abort('');
+
+          for var LTask in LTasks do
+            LTask.Wait;
+        end;
+
+        if not LState.ErrorMessage.IsEmpty then
+          raise EInOutError.Create(LState.ErrorMessage);
+      finally
+        LState.Free;
+      end;
+    finally
+      LEngine.Free;
+    end;
+  finally
+    CloseHandle(LFile);
+  end;
 end;
 
 procedure TPiFalseStartSearcher.SearchSelfLocatingStrings(const AData: PByte; const ADataLength, AFrom, ATo: Integer;
@@ -1233,7 +1668,10 @@ procedure TPiFalseStartSearcher.SearchThreadProc;
 begin
   try
     try
-      Search;
+      if FReadMethod in [rmIORingParallel, rmIORingParallelUnbuffered] then
+        SearchParallel
+      else
+        Search;
     finally
       // A canceled or failed run stops in the middle of a file, it must not stay open (and in the file cache)
       FReader.CloseCurrentFile;

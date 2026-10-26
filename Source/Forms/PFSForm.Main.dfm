@@ -134,25 +134,15 @@ object PFSMainForm: TPFSMainForm
       TabOrder = 1
       object LabelReadMethod: TLabel
         Left = 6
-        Top = 53
+        Top = 33
         Width = 46
         Height = 15
         Caption = 'Reading:'
         FocusControl = ComboBoxReadMethod
       end
-      object CheckBoxContinuationFiles: TCheckBox
-        Left = 6
-        Top = 4
-        Width = 410
-        Height = 17
-        Caption = 'Continue with the numbered follow-up files (_02, _03, ...)'
-        Checked = True
-        State = cbChecked
-        TabOrder = 0
-      end
       object CheckBoxSelfLocating: TCheckBox
         Left = 6
-        Top = 28
+        Top = 4
         Width = 410
         Height = 17
         Caption = 'Also search self-locating strings (digits at position P spell P)'
@@ -160,12 +150,12 @@ object PFSMainForm: TPFSMainForm
       end
       object ComboBoxReadMethod: TComboBox
         Left = 60
-        Top = 49
+        Top = 29
         Width = 356
         Height = 23
-        Hint = 
-          'How the digit files are read. All of them find the same false st' +
-          'arts; the summary shows the time and speed, for comparing them.'
+        Hint =
+          'How the digit file is read. All of them find the same false star' +
+          'ts; the summary shows the time and speed, for comparing them.'
         Style = csDropDownList
         ParentShowHint = False
         ShowHint = True

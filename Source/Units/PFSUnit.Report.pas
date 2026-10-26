@@ -214,7 +214,7 @@ begin
 
   ALines.BeginUpdate;
   try
-    ALines.Add(Format('Files: %d, %s GB', [Length(APiSearcher.FileNames), FormatFloat('0.00', LProgress.BytesTotal / BYTES_IN_GB)]));
+    ALines.Add(Format('File: %s, %s GB', [APiSearcher.FileName, FormatFloat('0.00', LProgress.BytesTotal / BYTES_IN_GB)]));
     ALines.Add('Searched prefix: ' + APiSearcher.PatternText);
     ALines.Add('Digits scanned: ' + IntToStrTS(LProgress.DigitsScanned));
     ALines.Add('Non-digit characters skipped: ' + IntToStrTS(APiSearcher.NonDigitCount));
@@ -227,12 +227,28 @@ begin
     // Seconds with decimals and the speed, to compare the reading methods
     ALines.Add(Format('Elapsed: %s (%s s), %s GB/s', [FormatElapsed(LProgress.ElapsedSeconds),
       FormatFloat('0.00', LProgress.ElapsedSeconds), FormatFloat('0.00', LBytesPerSecond / BYTES_IN_GB)]));
-    // Where the time went: reading runs in the background while the previous buffer is scanned
-    ALines.Add(Format('Scanning %s s, waiting for reads %s s', [FormatFloat('0.00', LProgress.ScanSeconds),
-      FormatFloat('0.00', LProgress.ReadWaitSeconds)]));
-    ALines.Add(Format('Reading in the background %s s, of which dropping non-digits %s s',
-      [FormatFloat('0.00', LProgress.ReadSeconds), FormatFloat('0.00', LProgress.CompactSeconds)]));
-    ALines.Add('(Waiting for reads near 0: the scan is the limit. Large: the reading is.)');
+    // Where the time went: reading runs in the background while the previous buffer is handled
+    if APiSearcher.ReadMethod in [rmIORingParallel, rmIORingParallelUnbuffered] then
+      // Added up over the workers, so more than the elapsed time
+      ALines.Add(Format('Added up over %d workers: waiting for reads %s s, dropping non-digits %s s, scanning %s s',
+        [PARALLEL_WORKER_COUNT, FormatFloat('0.00', LProgress.ReadWaitSeconds),
+        FormatFloat('0.00', LProgress.CompactSeconds), FormatFloat('0.00', LProgress.ScanSeconds)]))
+    else if APiSearcher.ReadMethod in [rmIORingReader, rmIORingReaderUnbuffered] then
+    begin
+      ALines.Add(Format('Scanning %s s, waiting for reads %s s', [FormatFloat('0.00', LProgress.ScanSeconds),
+        FormatFloat('0.00', LProgress.ReadWaitSeconds)]));
+      ALines.Add(Format('Reading in the background %s s, of which dropping non-digits %s s',
+        [FormatFloat('0.00', LProgress.ReadSeconds), FormatFloat('0.00', LProgress.CompactSeconds)]));
+    end
+    else
+    begin
+      ALines.Add(Format('Dropping non-digits %s s, scanning %s s, waiting for reads %s s',
+        [FormatFloat('0.00', LProgress.CompactSeconds), FormatFloat('0.00', LProgress.ScanSeconds),
+        FormatFloat('0.00', LProgress.ReadWaitSeconds)]));
+      ALines.Add(Format('Reading in the background %s s', [FormatFloat('0.00', LProgress.ReadSeconds)]));
+    end;
+
+    ALines.Add('(Waiting for reads near 0: the reads keep up. Large: the reading is the limit.)');
 
     AddStatisticsTable(APiSearcher, ALines);
 

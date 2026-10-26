@@ -23,7 +23,7 @@ type
     procedure WriteLines(const ALines: TStrings); virtual;
   public
     procedure Clear; virtual;
-    procedure LogFileCachePurged(const AFileNames: TArray<string>);
+    procedure LogFileCachePurged(const AFileName: string);
     procedure LogMatch(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
     // AListedKinds = the match lists added to the summary, see AddSummary
     procedure LogRunEnded(const APiSearcher: TPiFalseStartSearcher; const AListedKinds: TPFSMatchKinds);
@@ -66,10 +66,9 @@ begin
   // Nothing to clear by default
 end;
 
-procedure TPFSRunLog.LogFileCachePurged(const AFileNames: TArray<string>);
+procedure TPFSRunLog.LogFileCachePurged(const AFileName: string);
 begin
-  for var LFileName in AFileNames do
-    WriteLine('Removed from the file cache: ' + LFileName);
+  WriteLine('Removed from the file cache: ' + AFileName);
 end;
 
 procedure TPFSRunLog.LogMatch(const APiSearcher: TPiFalseStartSearcher; const AMatch: TPFSMatch);
@@ -98,9 +97,7 @@ end;
 
 procedure TPFSRunLog.LogRunStarted(const APiSearcher: TPiFalseStartSearcher);
 begin
-  for var LFileName in APiSearcher.FileNames do
-    WriteLine('File: ' + LFileName);
-
+  WriteLine('File: ' + APiSearcher.FileName);
   WriteLine('Searched prefix: ' + APiSearcher.PatternText);
   WriteLine('Reading: ' + READ_METHOD_NAMES[APiSearcher.ReadMethod]);
   WriteLine('');
